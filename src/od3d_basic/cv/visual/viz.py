@@ -53,6 +53,7 @@ def visualize_dataset(
         return
 
     server = viser.ViserServer()
+    server.scene.add_light_ambient("/ambient", intensity=3.0)
     n = len(dataset)
     idx = [0]
     handles: list = []
@@ -86,8 +87,10 @@ def visualize_dataset(
             result = item.viz(server=server)
             if isinstance(result, list):
                 handles.extend(result)
-        label.value = f"[{i + 1}/{n}]  {item_id}"
-        print(f"  [{i + 1}/{n}] {item_id}")
+        category = getattr(item, "category", None)
+        cat_str  = f"  cat={category}" if category is not None else ""
+        label.value = f"[{i + 1}/{n}]  {item_id}{cat_str}"
+        print(f"  [{i + 1}/{n}] {item_id}{cat_str}")
 
     with server.gui.add_folder("Navigation"):
         label    = server.gui.add_text("Item",   initial_value="loading…")

@@ -56,6 +56,7 @@ class Object:
     obj_kpts3d:              Optional[Tensor] = None  # (K, 3)
     obj_kpts3d_mask:         Optional[Tensor] = None  # (K,)  bool
     category:                Optional[int]    = None
+    category_id:             Optional[int]    = None
     attributes:              Optional[dict]   = None
 
     def viz(
@@ -65,15 +66,18 @@ class Object:
         H: int = 256,
         W: int = 256,
         server=None,
+        node_prefix: str = "/object",
+        gui_label: str = "Modalities",
+        position_offset: tuple = (0.0, 0.0, 0.0),
     ) -> "Optional[Tensor | list]":
         """Render or display the object.
 
         server=None — renders n_views with the chosen renderer and returns a
                       (3, H, W_total) strip tensor in [0, 1].
         server      — adds mesh, point cloud, and keypoints to the given viser
-                      server with checkbox-toggled visibility; returns None.
-                      Pass a freshly created ViserServer to display interactively,
-                      or a shared server when used inside visualize_dataset.
+                      server; returns the list of handles for later removal.
+                      node_prefix / gui_label / position_offset allow ObjectPair
+                      to place src and trgt side-by-side in the same scene.
         """
         if self.mesh is None and self.pts3d is None and self.obj_kpts3d is None:
             return None
@@ -97,7 +101,8 @@ class Object:
         mesh_handle = None
         if self.mesh is not None:
             mesh_handle = server.scene.add_mesh_trimesh(
-                "/object/mesh", _mesh_to_trimesh(self.mesh)
+                f"{node_prefix}/mesh", _mesh_to_trimesh(self.mesh),
+                position=position_offset,
             )
 
         pts_handle = None
@@ -105,7 +110,8 @@ class Object:
             pts    = self.pts3d.cpu().numpy()
             colors = np.full_like(pts, 0.7)
             pts_handle = server.scene.add_point_cloud(
-                "/object/pts3d", points=pts, colors=colors, point_size=0.005
+                f"{node_prefix}/pts3d", points=pts, colors=colors, point_size=0.005,
+                position=position_offset,
             )
 
         kpts_handle = None
@@ -116,9 +122,12 @@ class Object:
                        else torch.ones(len(self.obj_kpts3d), dtype=torch.bool)).cpu().numpy()
             kpts_mesh = _make_kpts_spheres(self.obj_kpts3d.cpu().numpy(), mask_np)
             if kpts_mesh is not None:
-                kpts_handle = server.scene.add_mesh_trimesh("/object/kpts3d", kpts_mesh)
+                kpts_handle = server.scene.add_mesh_trimesh(
+                    f"{node_prefix}/kpts3d", kpts_mesh,
+                    position=position_offset,
+                )
 
-        gui_folder = server.gui.add_folder("Modalities")
+        gui_folder = server.gui.add_folder(gui_label)
         with gui_folder:
             cb_mesh = server.gui.add_checkbox("Mesh",      initial_value=mesh_handle  is not None)
             cb_pts  = server.gui.add_checkbox("Points",    initial_value=pts_handle   is not None)
@@ -145,6 +154,46 @@ class ObjectPair:
     trgt_object_id: str
     src_object:     Object
     trgt_object:    Object
+
+    def viz(
+        self,
+        renderer: str = "pyrender",
+        n_views: int = 6,
+        H: int = 256,
+        W: int = 256,
+        server=None,
+        gap: float = 0.5,
+    ) -> "Optional[Tensor | list]":
+        """Render or display src and trgt objects side-by-side.
+
+        server=None — renders both objects and concatenates their strips
+                      width-wise, returning (3, H, W_src + W_trgt).
+        server      — adds src at origin and trgt offset along +x by the
+                      src mesh x-extent plus gap; returns all handles.
+        """
+        if server is None:
+            src_img  = self.src_object.viz(renderer=renderer, n_views=n_views, H=H, W=W)
+            trgt_img = self.trgt_object.viz(renderer=renderer, n_views=n_views, H=H, W=W)
+            imgs = [i for i in (src_img, trgt_img) if i is not None]
+            return torch.cat(imgs, dim=2) if imgs else None  # (3, H, W_total)
+
+        # compute x offset so trgt sits next to src
+        src_mesh = self.src_object.mesh
+        if src_mesh is not None:
+            x = src_mesh.verts[:, 0]
+            x_offset = (x.max() - x.min()).item() + gap
+        else:
+            x_offset = 2.0 + gap
+
+        src_handles  = self.src_object.viz(
+            server=server, node_prefix="/src",  gui_label="Source",
+            position_offset=(0.0, 0.0, 0.0),
+        ) or []
+        trgt_handles = self.trgt_object.viz(
+            server=server, node_prefix="/trgt", gui_label="Target",
+            position_offset=(x_offset, 0.0, 0.0),
+        ) or []
+        return src_handles + trgt_handles
 
 
 @dataclass
