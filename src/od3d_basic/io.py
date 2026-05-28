@@ -635,16 +635,16 @@ def _load_mesh(entry: Path):
         verts = torch.tensor(m.vertices, dtype=torch.float32)  # (V, 3)
         faces = torch.tensor(m.faces, dtype=torch.int64)       # (F, 3)
 
-        # center and normalize to unit bounding box
+        # center and normalize so the longest axis spans [-1, 1]
         v_min = verts.min(dim=0).values
         v_max = verts.max(dim=0).values
-        center = (v_min + v_max) * 0.5
-        scale  = (v_max - v_min).max().clamp(min=1e-8).item()
-        verts  = (verts - center) / scale
+        center     = (v_min + v_max) * 0.5
+        half_scale = (v_max - v_min).max().clamp(min=1e-8).item() * 0.5
+        verts      = (verts - center) / half_scale
 
-        # tform4x4: maps normalized → original  (original = scale * normalized + center)
+        # tform4x4: maps normalized → original  (original = half_scale * normalized + center)
         tform = torch.eye(4, dtype=torch.float32)
-        tform[:3, :3] = torch.eye(3) * scale
+        tform[:3, :3] = torch.eye(3) * half_scale
         tform[:3,  3] = center
 
         vert_colors = None

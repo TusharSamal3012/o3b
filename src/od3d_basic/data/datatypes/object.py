@@ -4,7 +4,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 from od3d_basic.data.datatypes.mesh import Mesh
-from od3d_basic.data.datatypes.frame import _stack_field
+from od3d_basic.data.datatypes.frame import _stack_field, _pad_stack_field
 
 
 def _draw_kpts2d_on_imgs(
@@ -69,14 +69,65 @@ def _render_mesh_trimesh(mesh: "Mesh", n_views: int = 6, H: int = 256, W: int = 
     return torch.stack(imgs)  # (N, 3, H, W)
 
 
+def _ncds0c_vert_colors(verts: "Tensor") -> "Tensor":
+    """Map (V, 3) NOCS-0c verts directly to RGB (V, 3) in [0, 1]."""
+    from od3d_basic.cv.visual.point3d_to_color3d import nocs_0c_to_rgb
+    return nocs_0c_to_rgb(verts.float().cpu())
+
+
+def _add_visibility_gui(server, label: str, handle_dicts: "list[dict]") -> object:
+    """Add a GUI folder with one checkbox per modality key controlling all objects.
+
+    handle_dicts: list of per-object dicts, each mapping modality key → scene handle.
+    """
+    KEYS = [
+        ("mesh",               "Mesh"),
+        ("mesh_feats",         "Mesh Feats"),
+        ("mesh_ncds0c_3dnn",   "Mesh NCDS0C 3DNN"),
+        ("mesh_ncds0c_featnn", "Mesh NCDS0C FeatNN"),
+        ("pts3d",              "Points"),
+        ("kpts3d",             "Keypoints"),
+    ]
+    gui_folder = server.gui.add_folder(label)
+    with gui_folder:
+        for key, label_text in KEYS:
+            all_h = [d[key] for d in handle_dicts if d.get(key) is not None]
+            cb = server.gui.add_checkbox(label_text, initial_value=(key == "mesh" and bool(all_h)))
+
+            def _make_cb(cb_ref, h_refs):
+                @cb_ref.on_update
+                def _(_):
+                    for h in h_refs:
+                        h.visible = cb_ref.value
+            _make_cb(cb, all_h)
+    return gui_folder
+
+
+def _pca_vert_colors(vert_feats: "Tensor") -> "Tensor":
+    """Project per-vertex features (V, F) → RGB via PCA, float32 (V, 3) in [0, 1]."""
+    V, F = vert_feats.shape
+    flat = vert_feats.float().cpu()
+    flat = flat - flat.mean(0)
+    q = min(3, F)
+    _, _, Vmat = torch.pca_lowrank(flat, q=q, niter=4)
+    pca = flat @ Vmat[:, :q]  # (V, q)
+    if q < 3:
+        pca = torch.cat([pca, torch.zeros(V, 3 - q)], dim=1)
+    for c in range(3):
+        ch = pca[:, c]
+        pca[:, c] = (ch - ch.min()) / (ch.max() - ch.min() + 1e-8)
+    return pca.clamp(0, 1)
+
+
 @dataclass(kw_only=True)
 class Object:
     object_id:               str
     pts3d:                   Optional[Tensor] = None  # (N, 3)
     pts3d_feats:             Optional[Tensor] = None  # (N, F) or (N, V, F) multi-view
     pts3d_feats_mask:        Optional[Tensor] = None  # (N,) or (N, V) bool
-    verts3d_feats:           Optional[Tensor] = None  # (N, F) or (N, V, F) multi-view
-    verts3d_feats_mask:      Optional[Tensor] = None  # (N,) or (N, V) bool
+    verts3d:                 Optional[Tensor] = None  # (V, 3)
+    verts3d_feats:           Optional[Tensor] = None  # (V, F) or (V, V, F) multi-view
+    verts3d_feats_mask:      Optional[Tensor] = None  # (V,) or (V, V) bool
     mesh:                    Optional[Mesh]   = None
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (4, 4)
     obj_kpts3d:              Optional[Tensor] = None  # (K, 3)
@@ -138,6 +189,9 @@ class Object:
         node_prefix: str = "/object",
         gui_label: str = "Modalities",
         position_offset: tuple = (0.0, 0.0, 0.0),
+        mesh_feats_colors:       "Optional[Tensor]" = None,
+        mesh_nocs_colors:        "Optional[Tensor]" = None,
+        mesh_nocs_featnn_colors: "Optional[Tensor]" = None,
     ) -> "Optional[Tensor | list]":
         """Render or display the object.
 
@@ -162,7 +216,25 @@ class Object:
             return torch.cat(list(imgs.clamp(0, 1)), dim=2)  # (3, H, W_total)
 
         # ── populate a viser server ───────────────────────────────────────────
+        handles = self._build_scene_handles(
+            server, node_prefix, position_offset,
+            mesh_feats_colors, mesh_nocs_colors, mesh_nocs_featnn_colors,
+        )
+        gui_folder = _add_visibility_gui(server, gui_label, [handles])
+        return [h for h in (*handles.values(), gui_folder) if h is not None]
+
+    def _build_scene_handles(
+        self,
+        server,
+        node_prefix: str,
+        position_offset: tuple,
+        mesh_feats_colors:       "Optional[Tensor]" = None,
+        mesh_nocs_colors:        "Optional[Tensor]" = None,
+        mesh_nocs_featnn_colors: "Optional[Tensor]" = None,
+    ) -> "dict":
+        """Add scene nodes to *server* and return a handle-dict (no GUI)."""
         import numpy as np
+        from dataclasses import replace as _dc_replace
         from od3d_basic.io import _mesh_to_trimesh
 
         mesh_handle = None
@@ -171,6 +243,34 @@ class Object:
                 f"{node_prefix}/mesh", _mesh_to_trimesh(self.mesh),
                 position=position_offset,
             )
+
+        mesh_feats_handle = None
+        if self.mesh is not None and (self.mesh.vert_feats is not None or mesh_feats_colors is not None):
+            feat_colors = mesh_feats_colors if mesh_feats_colors is not None else _pca_vert_colors(self.mesh.vert_feats)
+            mesh_with_feats = _dc_replace(self.mesh, vert_colors=feat_colors)
+            mesh_feats_handle = server.scene.add_mesh_trimesh(
+                f"{node_prefix}/mesh_feats", _mesh_to_trimesh(mesh_with_feats),
+                position=position_offset,
+            )
+            mesh_feats_handle.visible = False
+
+        mesh_nocs_handle = None
+        if self.mesh is not None and mesh_nocs_colors is not None:
+            mesh_with_nocs = _dc_replace(self.mesh, vert_colors=mesh_nocs_colors)
+            mesh_nocs_handle = server.scene.add_mesh_trimesh(
+                f"{node_prefix}/mesh_ncds0c_3dnn", _mesh_to_trimesh(mesh_with_nocs),
+                position=position_offset,
+            )
+            mesh_nocs_handle.visible = False
+
+        mesh_nocs_featnn_handle = None
+        if self.mesh is not None and mesh_nocs_featnn_colors is not None:
+            mesh_with_nocs_featnn = _dc_replace(self.mesh, vert_colors=mesh_nocs_featnn_colors)
+            mesh_nocs_featnn_handle = server.scene.add_mesh_trimesh(
+                f"{node_prefix}/mesh_ncds0c_featnn", _mesh_to_trimesh(mesh_with_nocs_featnn),
+                position=position_offset,
+            )
+            mesh_nocs_featnn_handle.visible = False
 
         pts_handle = None
         if self.pts3d is not None:
@@ -194,25 +294,14 @@ class Object:
                     position=position_offset,
                 )
 
-        gui_folder = server.gui.add_folder(gui_label)
-        with gui_folder:
-            cb_mesh = server.gui.add_checkbox("Mesh",      initial_value=mesh_handle  is not None)
-            cb_pts  = server.gui.add_checkbox("Points",    initial_value=pts_handle   is not None)
-            cb_kpts = server.gui.add_checkbox("Keypoints", initial_value=kpts_handle  is not None)
-
-        @cb_mesh.on_update
-        def _(_):
-            if mesh_handle  is not None: mesh_handle.visible  = cb_mesh.value
-
-        @cb_pts.on_update
-        def _(_):
-            if pts_handle   is not None: pts_handle.visible   = cb_pts.value
-
-        @cb_kpts.on_update
-        def _(_):
-            if kpts_handle  is not None: kpts_handle.visible  = cb_kpts.value
-
-        return [h for h in (mesh_handle, pts_handle, kpts_handle, gui_folder) if h is not None]
+        return {
+            "mesh":               mesh_handle,
+            "mesh_feats":         mesh_feats_handle,
+            "mesh_ncds0c_3dnn":   mesh_nocs_handle,
+            "mesh_ncds0c_featnn": mesh_nocs_featnn_handle,
+            "pts3d":              pts_handle,
+            "kpts3d":             kpts_handle,
+        }
 
 
 @dataclass(kw_only=True)
@@ -274,15 +363,51 @@ class ObjectPair:
         else:
             x_offset = 2.0 + gap
 
-        src_handles  = self.src_object.viz(
-            server=server, node_prefix="/src",  gui_label="Source",
-            position_offset=(0.0, 0.0, 0.0),
-        ) or []
-        trgt_handles = self.trgt_object.viz(
-            server=server, node_prefix="/trgt", gui_label="Target",
-            position_offset=(x_offset, 0.0, 0.0),
-        ) or []
-        return src_handles + trgt_handles
+        # joint PCA so feature colors are comparable across both objects
+        src_feats  = self.src_object.mesh.vert_feats  if (self.src_object.mesh  is not None and self.src_object.mesh.vert_feats  is not None) else None
+        trgt_feats = self.trgt_object.mesh.vert_feats if (self.trgt_object.mesh is not None and self.trgt_object.mesh.vert_feats is not None) else None
+        src_feat_colors = trgt_feat_colors = None
+        if src_feats is not None and trgt_feats is not None:
+            n_src = src_feats.shape[0]
+            combined_colors = _pca_vert_colors(torch.cat([src_feats.float().cpu(), trgt_feats.float().cpu()], dim=0))
+            src_feat_colors  = combined_colors[:n_src]
+            trgt_feat_colors = combined_colors[n_src:]
+        elif src_feats is not None:
+            src_feat_colors  = _pca_vert_colors(src_feats)
+        elif trgt_feats is not None:
+            trgt_feat_colors = _pca_vert_colors(trgt_feats)
+
+        # NOCS coloring: src colored by position, trgt by NN from src (verts already in NOCS-0c)
+        src_nocs_colors = trgt_nocs_colors = None
+        src_mesh_verts  = self.src_object.mesh.verts  if self.src_object.mesh  is not None else None
+        trgt_mesh_verts = self.trgt_object.mesh.verts if self.trgt_object.mesh is not None else None
+        if src_mesh_verts is not None:
+            src_nocs_colors = _ncds0c_vert_colors(src_mesh_verts)  # (V_src, 3)
+            if trgt_mesh_verts is not None:
+                nn_idx = torch.cdist(trgt_mesh_verts.float().cpu(), src_mesh_verts.float().cpu()).argmin(dim=1)
+                trgt_nocs_colors = src_nocs_colors[nn_idx]         # (V_trgt, 3)
+
+        # FeatNN: same src NOCS colors but NN determined in feature space
+        src_nocs_featnn_colors = trgt_nocs_featnn_colors = None
+        src_vert_feats  = self.src_object.mesh.vert_feats  if (self.src_object.mesh  is not None and self.src_object.mesh.vert_feats  is not None) else None
+        trgt_vert_feats = self.trgt_object.mesh.vert_feats if (self.trgt_object.mesh is not None and self.trgt_object.mesh.vert_feats is not None) else None
+        if src_nocs_colors is not None and src_vert_feats is not None:
+            src_nocs_featnn_colors = src_nocs_colors  # src keeps its own NOCS colors
+            if trgt_vert_feats is not None:
+                nn_idx_feat = torch.cdist(trgt_vert_feats.float().cpu(), src_vert_feats.float().cpu()).argmin(dim=1)
+                trgt_nocs_featnn_colors = src_nocs_colors[nn_idx_feat]  # (V_trgt, 3)
+
+        src_handles  = self.src_object._build_scene_handles(
+            server, "/src",  (0.0, 0.0, 0.0),
+            src_feat_colors, src_nocs_colors, src_nocs_featnn_colors,
+        )
+        trgt_handles = self.trgt_object._build_scene_handles(
+            server, "/trgt", (x_offset, 0.0, 0.0),
+            trgt_feat_colors, trgt_nocs_colors, trgt_nocs_featnn_colors,
+        )
+        gui_folder = _add_visibility_gui(server, "Objects", [src_handles, trgt_handles])
+        all_handles = [*src_handles.values(), *trgt_handles.values(), gui_folder]
+        return [h for h in all_handles if h is not None]
 
 
 @dataclass
@@ -291,8 +416,9 @@ class ObjectBatch:
     pts3d:                   Optional[Tensor] = None  # (B, N, 3)
     pts3d_feats:             Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
     pts3d_feats_mask:        Optional[Tensor] = None  # (B, N) or (B, N, V)  bool
-    verts3d_feats:           Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
-    verts3d_feats_mask:      Optional[Tensor] = None  # (B, N) or (B, N, V)  bool
+    verts3d:                 Optional[Tensor] = None  # (B, V, 3)
+    verts3d_feats:           Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
+    verts3d_feats_mask:      Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
     mesh:                    Optional[Mesh]   = None  # shared mesh for all B samples
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
     obj_kpts3d:              Optional[Tensor] = None  # (B, K, 3)
@@ -306,8 +432,9 @@ class ObjectPairBatch:
     src_pts3d:                    Optional[Tensor] = None  # (B, N, 3)
     src_pts3d_feats:              Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
     src_pts3d_feats_mask:         Optional[Tensor] = None  # (B, N) or (B, N, V)  bool
-    src_verts3d_feats:            Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
-    src_verts3d_feats_mask:       Optional[Tensor] = None  # (B, N) or (B, N, V)  bool
+    src_verts3d:                  Optional[Tensor] = None  # (B, V, 3)
+    src_verts3d_feats:            Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
+    src_verts3d_feats_mask:       Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
     src_mesh:                     Optional[Mesh]   = None  # shared mesh for all B src samples
     src_obj_ncds0c_tform4x4_obj:  Optional[Tensor] = None  # (B, 4, 4)
     src_obj_kpts3d:               Optional[Tensor] = None  # (B, K, 3)
@@ -316,8 +443,9 @@ class ObjectPairBatch:
     trgt_pts3d:                   Optional[Tensor] = None  # (B, N, 3)
     trgt_pts3d_feats:             Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
     trgt_pts3d_feats_mask:        Optional[Tensor] = None  # (B, N) or (B, N, V)  bool
-    trgt_verts3d_feats:           Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
-    trgt_verts3d_feats_mask:      Optional[Tensor] = None  # (B, N) or (B, N, V)  bool
+    trgt_verts3d:                 Optional[Tensor] = None  # (B, V, 3)
+    trgt_verts3d_feats:           Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
+    trgt_verts3d_feats_mask:      Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
     trgt_mesh:                    Optional[Mesh]   = None  # shared mesh for all B trgt samples
     trgt_obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
     trgt_obj_kpts3d:              Optional[Tensor] = None  # (B, K, 3)
@@ -335,8 +463,24 @@ def collate_object_pairs(
             return None
         return _stack_field(vals)
 
+    def _get_pad(attr, side: str):
+        """Pad-stack variable-length vertex tensors; merge with per-item mask."""
+        vals = [getattr(getattr(s, f"{side}_object"), attr) for s in samples]
+        if include and f"{side}_{attr}" not in include:
+            return None, None
+        return _pad_stack_field(vals)
+
+    def _merge_masks(pad_mask, raw_mask):
+        if pad_mask is None and raw_mask is None:
+            return None
+        if pad_mask is None:
+            return raw_mask
+        if raw_mask is None:
+            return pad_mask
+        return pad_mask & raw_mask
+
     def _cat(side: str):
-        vals = [getattr(s, f"{side}_object").category for s in samples]
+        vals = [getattr(s, f"{side}_object").category_id for s in samples]
         key = f"{side}_category"
         if include and key not in include:
             return None
@@ -344,12 +488,21 @@ def collate_object_pairs(
             torch.tensor(v) if v is not None else None for v in vals
         ])
 
+    src_verts3d,       _src_verts_pad_mask  = _get_pad("verts3d",            "src")
+    src_verts3d_feats, _src_feats_pad_mask  = _get_pad("verts3d_feats",       "src")
+    _src_feats_mask_raw, _                  = _get_pad("verts3d_feats_mask",  "src")
+
+    trgt_verts3d,       _trgt_verts_pad_mask = _get_pad("verts3d",            "trgt")
+    trgt_verts3d_feats, _trgt_feats_pad_mask = _get_pad("verts3d_feats",       "trgt")
+    _trgt_feats_mask_raw, _                  = _get_pad("verts3d_feats_mask",  "trgt")
+
     return ObjectPairBatch(
         src_pts3d                   = _get("pts3d",                   "src"),
         src_pts3d_feats             = _get("pts3d_feats",             "src"),
         src_pts3d_feats_mask        = _get("pts3d_feats_mask",        "src"),
-        src_verts3d_feats           = _get("verts3d_feats",           "src"),
-        src_verts3d_feats_mask      = _get("verts3d_feats_mask",      "src"),
+        src_verts3d                 = src_verts3d,
+        src_verts3d_feats           = src_verts3d_feats,
+        src_verts3d_feats_mask      = _merge_masks(_src_feats_pad_mask, _src_feats_mask_raw),
         src_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","src"),
         src_obj_kpts3d              = _get("obj_kpts3d",              "src"),
         src_obj_kpts3d_mask         = _get("obj_kpts3d_mask",         "src"),
@@ -357,8 +510,9 @@ def collate_object_pairs(
         trgt_pts3d                   = _get("pts3d",                   "trgt"),
         trgt_pts3d_feats             = _get("pts3d_feats",             "trgt"),
         trgt_pts3d_feats_mask        = _get("pts3d_feats_mask",        "trgt"),
-        trgt_verts3d_feats           = _get("verts3d_feats",           "trgt"),
-        trgt_verts3d_feats_mask      = _get("verts3d_feats_mask",      "trgt"),
+        trgt_verts3d                 = trgt_verts3d,
+        trgt_verts3d_feats           = trgt_verts3d_feats,
+        trgt_verts3d_feats_mask      = _merge_masks(_trgt_feats_pad_mask, _trgt_feats_mask_raw),
         trgt_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","trgt"),
         trgt_obj_kpts3d              = _get("obj_kpts3d",              "trgt"),
         trgt_obj_kpts3d_mask         = _get("obj_kpts3d_mask",         "trgt"),
@@ -376,17 +530,37 @@ def collate_objects(
             return None
         return _stack_field(vals)
 
+    def _get_pad(attr):
+        vals = [getattr(s, attr) for s in samples]
+        if include and attr not in include:
+            return None, None
+        return _pad_stack_field(vals)
+
+    def _merge_masks(pad_mask, raw_mask):
+        if pad_mask is None and raw_mask is None:
+            return None
+        if pad_mask is None:
+            return raw_mask
+        if raw_mask is None:
+            return pad_mask
+        return pad_mask & raw_mask
+
+    verts3d,       _verts_pad_mask  = _get_pad("verts3d")
+    verts3d_feats, _feats_pad_mask  = _get_pad("verts3d_feats")
+    _feats_mask_raw, _              = _get_pad("verts3d_feats_mask")
+
     return ObjectBatch(
         pts3d                   = _get("pts3d"),
         pts3d_feats             = _get("pts3d_feats"),
         pts3d_feats_mask        = _get("pts3d_feats_mask"),
-        verts3d_feats           = _get("verts3d_feats"),
-        verts3d_feats_mask      = _get("verts3d_feats_mask"),
+        verts3d                 = verts3d,
+        verts3d_feats           = verts3d_feats,
+        verts3d_feats_mask      = _merge_masks(_feats_pad_mask, _feats_mask_raw),
         obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj"),
         obj_kpts3d              = _get("obj_kpts3d"),
         obj_kpts3d_mask         = _get("obj_kpts3d_mask"),
         category = _stack_field([
-            torch.tensor(s.category) if s.category is not None else None
+            torch.tensor(s.category_id) if s.category_id is not None else None
             for s in samples
         ]) if (include is None or "category" in include) else None,
     )

@@ -1,11 +1,9 @@
 import logging
 
 logger = logging.getLogger(__name__)
-from od3d_basic.od3d_datasets.co3d import frame
-from od3d_basic.od3d_datasets.frame import OD3D_Frame
+
 from od3d_basic.cv.transforms.transform import OD3D_Transform
 from od3d_basic.cv.visual.crop import crop, crop_with_bbox
-from od3d_basic.od3d_datasets.frame import OD3D_FRAME_MODALITIES
 import torch
 
 
@@ -21,7 +19,12 @@ class BBoxsCrops(OD3D_Transform):
         #self.mode_mask = "nearest_v2"  # "bilinear" "nearest_v2""
         #self.mode_pxl_cat_id = "nearest_v2"
 
-    def __call__(self, frame: OD3D_Frame):
+    def __call__(self, frame): # : OD3D_Frame
+
+        from od3d_basic.od3d_datasets.co3d import frame
+        from od3d_basic.od3d_datasets.frame import OD3D_Frame
+        from od3d_basic.od3d_datasets.frame import OD3D_FRAME_MODALITIES
+
         # logger.info(f"Frame name {self.name}")
 
         apply_rgb = OD3D_FRAME_MODALITIES.RGB in frame.modalities

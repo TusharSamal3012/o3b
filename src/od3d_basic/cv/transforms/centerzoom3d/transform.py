@@ -5,10 +5,9 @@ import torch
 from od3d_basic.cv.geometry.transform import (
     proj3d2d,
 )
-from od3d_basic.od3d_datasets.frame import OD3D_FRAME_MODALITIES, OD3D_Frame
+
 from od3d_basic.cv.visual.crop import crop
 from omegaconf import DictConfig
-from od3d_basic.od3d_datasets.dtd import DTD
 import torchvision
 from od3d_basic.cv.transforms.transform import OD3D_Transform
 from od3d_basic.cv.geometry.grid import get_pxl2d
@@ -58,7 +57,10 @@ class CenterZoom3D(OD3D_Transform):
         self.mode_mask = "nearest_v2"  # "bilinear" "nearest_v2""
         self.mode_pxl_cat_id = "nearest_v2"
 
-    def __call__(self, frame: OD3D_Frame):
+    def __call__(self, frame): # : OD3D_Frame
+        from od3d_basic.od3d_datasets.frame import OD3D_FRAME_MODALITIES, OD3D_Frame
+        from od3d_basic.od3d_datasets.dtd import DTD
+
         # logger.info(f"Frame name {self.name}")
         # _, _, _, _ = frame.size, frame.cam_intr4x4, frame.cam_tform4x4_obj, frame.cam_proj4x4_obj
 

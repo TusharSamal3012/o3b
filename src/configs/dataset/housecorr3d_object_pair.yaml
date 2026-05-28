@@ -1,0 +1,7 @@
+defaults:
+  - housecorr3d
+  - _self_
+
+item_type: object_pair # frame, object, scene, frame_object, scene_object
+
+mesh_type: "mc16_vuni4_r256_fdinov2s"

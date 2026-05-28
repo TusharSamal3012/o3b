@@ -1,0 +1,2 @@
+from od3d_basic.task.datatypes.object_pair_quant import ObjectPairQuantBatch
+from od3d_basic.task.datatypes.object_pair_qualit import ObjectPairQualitBatch

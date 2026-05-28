@@ -11,6 +11,26 @@ def _stack_field(values: list) -> Optional[Tensor]:
     return torch.stack(values, dim=0)
 
 
+def _pad_stack_field(values: list):
+    """Pad variable-size dim-0 tensors into (B, V_max, ...) and return (padded, valid_mask).
+
+    If all tensors share the same first dimension, no padding occurs and mask is None.
+    """
+    if any(v is None for v in values):
+        return None, None
+    sizes = [v.shape[0] for v in values]
+    if len(set(sizes)) == 1:
+        return torch.stack(values, dim=0), None
+    V_max = max(sizes)
+    B = len(values)
+    out = torch.zeros((B, V_max) + values[0].shape[1:], dtype=values[0].dtype)
+    mask = torch.zeros(B, V_max, dtype=torch.bool)
+    for i, (v, s) in enumerate(zip(values, sizes)):
+        out[i, :s] = v
+        mask[i, :s] = True
+    return out, mask
+
+
 def _pca_to_rgb(featmap: Tensor) -> Tensor:
     """Project (H, W, F) feature map to (H, W, 3) via PCA, output in [0, 1]."""
     H, W, F = featmap.shape
