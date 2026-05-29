@@ -109,9 +109,18 @@ def _extract_vert_feats(
     """
     import torch
     import torch.nn.functional as F
-    from types import SimpleNamespace
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ── Diff3F path: delegate rendering + feature extraction to the model ─────
+    if "diff3f" in feature_model_name.lower():
+        from od3d_basic.model.model import OD3D_Model
+        from od3d_basic.data.datatypes.object import ObjectBatch
+        model = OD3D_Model.create_by_name(feature_model_name)
+        model.eval()
+        obj_batch = ObjectBatch(mesh=mesh)
+        obj_batch = model(obj_batch)
+        return obj_batch.verts3d_feats[0].cpu()  # (V, F)
 
     H = W = resolution
 
@@ -121,7 +130,9 @@ def _extract_vert_feats(
 
     batch = sample_uniform_viewpoints(n_views, mesh=mesh)
     modalities = render_mesh_from_viewpoints(batch, H=H, W=W, renderer="pyrender")
-    rgbs = modalities["rgb"]                                      # (N, 3, H, W) float [0,1]
+    rgbs    = modalities["rgb"].to(device)                               # (N, 3, H, W) float [0,1]
+    depths  = modalities["depth"][:, 0].to(device) if "depth"   in modalities else None  # (N, H, W)
+    normals = modalities["normals"].to(device)      if "normals" in modalities else None  # (N, 3, H, W)
 
     cam_tform4x4_obj = batch.cam_tform4x4_obj                   # (N, 4, 4)
     cam_intr4x4_single = get_default_camera_intrinsics_from_img_size(W, H)  # (4, 4)
@@ -129,16 +140,13 @@ def _extract_vert_feats(
 
     # ── 2. Load feature model and extract featmaps ────────────────────────────
     from od3d_basic.model.model import OD3D_Model
+    from od3d_basic.data.datatypes.frame import FrameBatch
     model = OD3D_Model.create_by_name(feature_model_name)
     model.eval().to(device)
 
-    mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-    std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
-    rgbs_norm = (rgbs.to(device) - mean) / std
-
     with torch.no_grad():
-        frames_in  = SimpleNamespace(rgb=rgbs_norm)
-        frames_out = SimpleNamespace(rgb=rgbs_norm, featmap=None, feat=None)
+        frames_in  = FrameBatch(rgb=rgbs, depth=depths, normal=normals)
+        frames_out = FrameBatch(rgb=rgbs, depth=depths, normal=normals)
         _, frames_out = model(frames_in, frames_out)
     featmaps = frames_out.featmap  # (N, C, H_f, W_f)
 
@@ -174,7 +182,7 @@ def _extract_vert_feats(
     grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(2)    # (N, V, 1, 2)
 
     sampled = F.grid_sample(
-        featmaps, grid, mode="bilinear", align_corners=True, padding_mode="zeros"
+        featmaps.float(), grid, mode="bilinear", align_corners=True, padding_mode="zeros"
     )                                                             # (N, C, V, 1)
     sampled = sampled.squeeze(-1)                                 # (N, C, V)
 

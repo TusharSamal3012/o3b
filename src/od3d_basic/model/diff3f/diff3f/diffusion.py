@@ -1,15 +1,6 @@
 import torch
 from PIL import Image
 import numpy as np
-from diffusers import ControlNetModel
-from od3d_basic.model.diff3f.diff3f.unet_2d_condition import UNet2DConditionModel
-from od3d_basic.model.diff3f.diff3f.pipeline_controlnet_img2img import StableDiffusionControlNetImg2ImgPipeline
-#from diffusers import StableDiffusionControlNetImg2ImgPipeline, ControlNetModel # lets try again with fix
-from diffusers import DDIMScheduler
-from safetensors.torch import load_file
-import cv2
-from torchvision import transforms
-from huggingface_hub import hf_hub_download
 
 DIFFUSION_MODEL_ID = "runwayml/stable-diffusion-v1-5"
 ckpt = "diffusion_pytorch_model.fp16.safetensors"
@@ -36,6 +27,7 @@ def HWC3(x):
 
 class CannyDetector:
     def __call__(self, img, low_threshold, high_threshold):
+        import cv2
         return cv2.Canny(img, low_threshold, high_threshold)
 
 
@@ -50,6 +42,7 @@ def rgb2canny(img):
 
 
 def sketch(img):
+    import cv2
     gray_image = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     inverted_gray_image = 255 - gray_image
     blurred_image = cv2.GaussianBlur(inverted_gray_image, (21, 21), 0)
@@ -71,26 +64,30 @@ def rgb2normalmap(normal_map):
 
 
 
-def init_pipe(device):
-    controlnet = [
-        ControlNetModel.from_pretrained(
-            "lllyasviel/control_v11f1p_sd15_depth",
-            torch_dtype=torch.float16,
-        ),
-        # ControlNetModel.from_pretrained(
-        #     "lllyasviel/control_v11p_sd15_canny",
-        #     torch_dtype=torch.float16,
-        # ),
-        ControlNetModel.from_pretrained(
-        "lllyasviel/control_v11p_sd15_normalbae",
+def init_pipe(device, use_normal_map: bool = False):
+    from diffusers import ControlNetModel, DDIMScheduler
+    from safetensors.torch import load_file
+    from huggingface_hub import hf_hub_download
+    from od3d_basic.model.diff3f.diff3f.unet_2d_condition import UNet2DConditionModel
+    from od3d_basic.model.diff3f.diff3f.pipeline_controlnet_img2img import StableDiffusionControlNetImg2ImgPipeline
+
+    depth_controlnet = ControlNetModel.from_pretrained(
+        "lllyasviel/control_v11f1p_sd15_depth",
         torch_dtype=torch.float16,
-        ),
-    ]
+    )
+    if use_normal_map:
+        normal_controlnet = ControlNetModel.from_pretrained(
+            "lllyasviel/control_v11p_sd15_normalbae",
+            torch_dtype=torch.float16,
+        )
+        controlnet = [depth_controlnet, normal_controlnet]
+    else:
+        controlnet = depth_controlnet
 
     #pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
     #    DIFFUSION_MODEL_ID, controlnet=controlnet, torch_dtype=torch.float16, safety_checker=None,
     #)
-    
+
     # not sure if this is needed for any reason?
     unet = UNet2DConditionModel.from_config(DIFFUSION_MODEL_ID, subfolder="unet").to(device, torch.float16)
     unet.load_state_dict(load_file(hf_hub_download(repo_id=repo, subfolder="unet", filename=ckpt)))
@@ -102,7 +99,6 @@ def init_pipe(device):
        safety_checker=None,
     )
 
-
     pipe.set_progress_bar_config(disable=True)
     pipe = pipe.to(device)
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
@@ -111,16 +107,15 @@ def init_pipe(device):
     return pipe
 
 
-transform = transforms.ToPILImage()
-
 def process_depth_map(depth):
+    from torchvision import transforms
     max_depth = depth.max()
     indices = depth == -1
-    depth = max_depth - depth 
+    depth = max_depth - depth
     depth[indices] = 0
     max_depth = depth.max()
     depth = depth / max_depth
-    depth = transform(depth)
+    depth = transforms.ToPILImage()(depth)
     return depth
 
 
@@ -135,30 +130,31 @@ def run_diffusion(
     return_image=False
 ):
     depth_map = process_depth_map(depth_map)
-    # canny = Image.fromarray(np.uint8(rgb2canny(input_image)))
-    control_image = [depth_map]
     if normal_map_input is not None:
-        normal_map =  Image.fromarray(rgb2normalmap(normal_map_input))
-        control_image.append(normal_map)
+        normal_map = Image.fromarray(rgb2normalmap(normal_map_input))
+        control_image = [depth_map, normal_map]
+    else:
+        control_image = depth_map
     generator = torch.manual_seed(60)
     pos_prompt = f"{prompt},best quality,highly detailed,photorealistic,photo"
     negative_prompt = "lowres,low quality,monochrome,watermark"
     output_type = "pil"
     if use_latent:
         output_type = "latent"
-    output = pipe(
-        pos_prompt,
-        negative_prompt=negative_prompt,
-        num_inference_steps=30,
-        image=Image.fromarray(input_image),
-        control_image=control_image,
-        num_images_per_prompt=num_images_per_prompt,
-        guidance_scale=7,
-        eta=1,
-        output_type=output_type,
-        return_image=return_image
-        # generator=generator,
-    ).images
+    with torch.no_grad():
+        output = pipe(
+            pos_prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=30,
+            image=Image.fromarray(input_image),
+            control_image=control_image,
+            num_images_per_prompt=num_images_per_prompt,
+            guidance_scale=7,
+            eta=1,
+            output_type=output_type,
+            return_image=return_image
+            # generator=generator,
+        ).images
     return output
 
 

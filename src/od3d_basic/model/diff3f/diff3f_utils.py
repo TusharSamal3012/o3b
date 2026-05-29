@@ -3,7 +3,7 @@ import gc
 from unicodedata import category
 
 import torch
-from od3d_basic.model.diff3f.diff3f import get_features_per_vertex
+from od3d_basic.model.diff3f.diff3f.diff3f import get_features_per_vertex
 from time import time
 from od3d_basic.model.diff3f.diff3f.utils import convert_mesh_container_to_torch_mesh, cosine_similarity, double_plot, get_colors, generate_colors
 from od3d_basic.model.diff3f.diff3f.dataloaders.mesh_container import MeshContainer

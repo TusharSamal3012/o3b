@@ -30,6 +30,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "VGGTCameraHead":  "od3d_basic.model.vggt_camera_head.model",
     "PointNet2":       "od3d_basic.model.pointnet2.model",
     "LitePT":          "od3d_basic.model.litept.model",
+    "Diff3F":          "od3d_basic.model.diff3f.model",
 }
 
 

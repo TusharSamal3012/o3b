@@ -1,16 +1,15 @@
-from pytorch3d.renderer.cameras import look_at_view_transform, PerspectiveCameras
-from pytorch3d.renderer.mesh.rasterizer import RasterizationSettings, MeshRasterizer
-from pytorch3d.renderer.mesh.shader import HardPhongShader
-from pytorch3d.renderer import MeshRenderer
-from pytorch3d.renderer.lighting import PointLights
-from od3d_basic.model.diff3f.diff3f.normal_shading import HardPhongNormalShader
 import torch
 import math
-import time
 
 
 @torch.no_grad()
 def run_rendering(device, mesh, mesh_vertices, num_views, H, W, add_angle_azi=0, add_angle_ele=0, use_normal_map=False):
+    from pytorch3d.renderer.cameras import look_at_view_transform, PerspectiveCameras
+    from pytorch3d.renderer.mesh.rasterizer import RasterizationSettings, MeshRasterizer
+    from pytorch3d.renderer.mesh.shader import HardPhongShader
+    from pytorch3d.renderer import MeshRenderer
+    from pytorch3d.renderer.lighting import PointLights
+    from od3d_basic.model.diff3f.diff3f.normal_shading import HardPhongNormalShader
     bbox = mesh.get_bounding_boxes()
     bbox_min = bbox.min(dim=-1).values[0]
     bbox_max = bbox.max(dim=-1).values[0]

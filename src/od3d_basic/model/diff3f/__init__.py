@@ -1,4 +1,3 @@
-from od3d_basic.model.diff3f.method import DenseMatcher
 
 # for densematcher
 # cd third_party
@@ -14,7 +13,14 @@ from od3d_basic.model.diff3f.method import DenseMatcher
 # pip install --no-cache-dir ./dift
 # git clone https://github.com/nvlabs/odise
 
+
 # for diff3f
+# pip install diffusers transformers accelerate
+# pip install pytorch3d==0.7.8+pt2.6.0cu124 --extra-index-url https://miropsota.github.io/torch_packages_builder
+
+
+
+
 # pip install libigl
 # pip install pythreejs
 # pip install git+https://github.com/skoch9/meshplot.git

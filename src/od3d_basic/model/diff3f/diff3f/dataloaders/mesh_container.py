@@ -2,7 +2,6 @@ import numpy as np
 import scipy.io as sio
 import os
 import pickle
-from plyfile import PlyData
 import trimesh
 
 
@@ -66,6 +65,8 @@ class MeshContainer(object):
         self.n = self.vert.shape[0]
 
     def _load_from_file_ply(self, file_path):
+
+        from plyfile import PlyData
         self.load_file_name = file_path
         ply_data = PlyData.read(file_path)
         vx = np.array(ply_data['vertex'].data['x'])[:, np.newaxis]
@@ -157,6 +158,8 @@ class MeshContainer(object):
         )
         el = PlyElement.describe(vertex, "vertex")
         el2 = PlyElement.describe(face, "face")
+
+        from plyfile import PlyData
         plydata = PlyData([el, el2])
         plydata.write(self.load_file_name[:-4] + '.ply')
 

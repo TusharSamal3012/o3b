@@ -52,6 +52,7 @@ class Frame:
     depth:        Optional[Tensor]       = None  # (H, W)
     depth_mask:   Optional[Tensor]       = None  # (H, W)  bool
     mask:         Optional[Tensor]       = None  # (H, W)  bool
+    normal:       Optional[Tensor]       = None  # (3, H, W) world-space normals mapped to [0,1]
     feat:         Optional[Tensor]       = None  # (F,)
     featmap:      Optional[Tensor]       = None  # (F, H, W)
     featmap_lvls: Optional[List[Tensor]] = None  # L x (F, H_l, W_l)
@@ -147,6 +148,7 @@ class FrameBatch:
     depth:        Optional[Tensor]       = None  # (B, H, W)
     depth_mask:   Optional[Tensor]       = None  # (B, H, W)
     mask:         Optional[Tensor]       = None  # (B, H, W)  bool
+    normal:       Optional[Tensor]       = None  # (B, 3, H, W) world-space normals mapped to [0,1]
     feat:         Optional[Tensor]       = None  # (B, F)
     featmap:      Optional[Tensor]       = None  # (B, F, H, W)
     featmap_lvls: Optional[List[Tensor]] = None  # L x (B, F, H_l, W_l)
@@ -179,6 +181,7 @@ def collate_frames(
         depth        = _get("depth"),
         depth_mask   = _get("depth_mask"),
         mask         = _get("mask"),
+        normal       = _get("normal"),
         feat         = _get("feat"),
         featmap      = _get("featmap"),
         featmap_lvls = _get_lvls("featmap_lvls"),

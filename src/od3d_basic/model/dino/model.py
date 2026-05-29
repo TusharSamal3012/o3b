@@ -211,6 +211,11 @@ class DINOv2(OD3D_Model):
 
         x = frames_gt.rgb
 
+        # ImageNet normalisation — expects raw [0,1] RGB from the caller
+        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        std  = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        x = (x - mean) / std
+
         if x.dim() == 3:
             C, H, W = x.shape
             B = 1

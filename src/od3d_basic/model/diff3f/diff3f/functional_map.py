@@ -1,7 +1,5 @@
 import numpy as np
 import torch
-from pyFM.mesh import TriMesh
-from pyFM.functional import FunctionalMapping
 
 
 #def compute_surface_map(path_1, path_2, c1, c2, source_index=None, target_index=None, use_wks=False, device=torch.device("cuda:0"), n_descr=2048):
@@ -10,6 +8,9 @@ from pyFM.functional import FunctionalMapping
     
 def compute_surface_map(verts1, verts2, faces1, faces2, c1, c2, source_index=None, target_index=None, use_wks=False, 
                         device=torch.device("cuda:0"), n_descr=2048, fpath_source_mesh=None, fpath_target_mesh=None):
+    from pyFM.mesh import TriMesh
+    from pyFM.functional import FunctionalMapping
+
     if fpath_source_mesh is not None and fpath_target_mesh is not None:
         mesh1 = TriMesh(str(fpath_source_mesh))
         mesh2 = TriMesh(str(fpath_target_mesh))

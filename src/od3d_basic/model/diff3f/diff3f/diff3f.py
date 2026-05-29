@@ -181,7 +181,7 @@ def get_features_per_vertex(
     missing_features = len(ft_per_vertex_count[ft_per_vertex_count == 0])
     print("Number of missing features: ", missing_features)
     print("Copied features from nearest vertices")
-
+    
     if missing_features > 0:
         filled_indices = ft_per_vertex_count[:, 0] != 0
         missing_indices = ft_per_vertex_count[:, 0] == 0

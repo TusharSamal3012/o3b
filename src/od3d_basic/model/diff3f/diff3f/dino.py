@@ -1,7 +1,5 @@
 import torch
 import numpy as np
-from torchvision import transforms as tfs
-
 
 patch_size = 14
 
@@ -16,6 +14,7 @@ def init_dino(device):
 
 @torch.no_grad
 def get_dino_features(device, dino_model, img, grid):
+    from torchvision import transforms as tfs
     transform = tfs.Compose(
         [
             tfs.Resize((518, 518)),
