@@ -1,7 +1,7 @@
 defaults:
   - default
   - _self_
-  - optional custom@: local_custom
+  - optional override custom@: local_custom
 
 
 path_ws: /home/sommerl/workspace

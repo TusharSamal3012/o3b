@@ -4,22 +4,20 @@ class_name: HouseCorr3D
 #path_raw_datasets: /home/sommerl/Desktop/uco3d_label/datasets
 #path_preprocess_datasets: /home/sommerl/Desktop/uco3d_label/datasets
 
-path_raw_datasets: /data/lmbraid19/sommerl/datasets
-path_preprocess_datasets: /data/lmbraid19/sommerl/datasets
+path_datasets_raw: /data/lmbraid19/sommerl/datasets
+path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
 
-path_raw: ${path_raw_datasets}/Omni6DPose
-path_preprocess: ${path_preprocess_datasets}/Omni6DPose_Preprocess
+path_raw: ${path_datasets_raw}/Omni6DPose
+path_preprocess: ${path_datasets_preprocess}/Omni6DPose_Preprocess
 
 # rm -rf /home/sommerl/Desktop/uco3d_label/datasets
 # mkdir -p /home/sommerl/Desktop/uco3d_label/datasets
 # sshfs slurm:/work/dlclarge1/sommerl-od3d/datasets /home/sommerl/Desktop/uco3d_label/datasets
 # fusermount -u /home/sommerl/Desktop/uco3d_label/datasets
 
-
 item_type: object_pair # frame, object, scene, frame_object, scene_object
 
 filter_has_kpts: true
-
 
 #batch_type: scene_object
 
