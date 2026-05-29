@@ -98,6 +98,15 @@ def _build_platform_parser(sub):
         help="Also print the resolved platform config",
     )
 
+    p_runi = plat_sub.add_parser(
+        "runi",
+        help="Open an interactive shell on a compute node via srun --pty bash",
+    )
+    p_runi.add_argument(
+        "-p", "--platform", default="slurm", metavar="PLATFORM",
+        help="Platform name matching a config in configs/platform/ (default: slurm)",
+    )
+
 
 def _load_platform_config(platform: str):
     """Load a platform config using Hydra, with configs/platform/ as the config root."""
@@ -228,18 +237,21 @@ def _run_platform_setup(args):
         repo_name = "housecorr3d"
         local_repo_root = str(Path.cwd())
 
-    # Inject the GitHub token (already interpolated by OmegaConf) into the
-    # housecorr3d HTTPS remote URL so git clone authenticates on the cluster.
+    # Inject the GitHub token into the HTTPS remote URL so git clone on the
+    # cluster can authenticate through the proxy without SSH keys.
     token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
     try:
         raw_remote = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
             text=True, cwd=local_repo_root,
         ).strip()
-        # Ensure plain HTTPS (strip any existing token) then prepend the new one
+        # Convert SSH → HTTPS if needed: git@github.com:Org/Repo → https://github.com/Org/Repo
+        if raw_remote.startswith("git@"):
+            raw_remote = re.sub(r"git@github\.com:", "https://github.com/", raw_remote)
+        # Strip any existing token then prepend the new one
         plain = re.sub(r"https://[^@]+@", "https://", raw_remote)
         repo_url  = plain.replace("https://", f"https://{token}@") if token else plain
-        repo_name = Path(plain).stem   # e.g. HouseCorr3Dv2
+        repo_name = Path(re.sub(r"\.git$", "", plain.split("/")[-1])).name
     except subprocess.CalledProcessError:
         repo_url  = ""
         repo_name = Path(local_repo_root).name
@@ -260,6 +272,7 @@ def _run_platform_setup(args):
         subprocess.run(["scp", str(local), target], check=True)
 
     # Build sbatch wrapper with #SBATCH headers from the platform config
+    _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
     env_vars = {
         "PATH_WS":         path_ws,
         "PATH_CUDA":       path_cuda,
@@ -268,6 +281,10 @@ def _run_platform_setup(args):
         "BRANCH":          branch,
         "PULL":            "true" if pull else "false",
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
+        "HTTP_PROXY":      _proxy,
+        "HTTPS_PROXY":     _proxy,
+        "http_proxy":      _proxy,
+        "https_proxy":     _proxy,
     }
     sbatch_script = _make_sbatch_script(
         cfg,
@@ -489,11 +506,63 @@ def _run_platform_overview(args):
             _open_log(ssh_host, path_home, action[1])
 
 
+def _run_platform_runi(args):
+    import subprocess
+
+    cfg, _ = _load_platform_config(args.platform)
+
+    ssh_host = cfg.get("ssh")
+    if not ssh_host or ssh_host is False:
+        raise ValueError(
+            f"Platform '{args.platform}' has no ssh host configured (ssh: {ssh_host!r})"
+        )
+
+    partition     = cfg.get("partition", None)
+    node_count    = cfg.get("node_count", 1)
+    gpu_count     = cfg.get("gpu_count_per_node", 1)
+    cpu_count     = cfg.get("cpu_count_per_gpu", 8)
+    ram_per_cpu   = cfg.get("ram_per_cpu", "5gb")
+    walltime      = cfg.get("walltime", "24:00:00")
+    nodes_exclude = cfg.get("nodes_exclude", None)
+    total_mem     = _multiply_metric_with_unit(ram_per_cpu, cpu_count)
+
+    srun = (
+        f"srun"
+        f" --nodes {node_count}"
+        f" --ntasks-per-node 1"
+        f" --gres gpu:{gpu_count}"
+        f" --cpus-per-task {cpu_count}"
+        f" --mem {total_mem}"
+        f" --time {walltime}"
+    )
+    if partition:
+        srun += f" --partition {partition}"
+    if nodes_exclude:
+        srun += f" --exclude {nodes_exclude}"
+    path_ws = cfg.get("path_ws", "")
+    if path_ws:
+        srun += f" --chdir {path_ws}"
+    _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
+    srun += (
+        f" --export=ALL"
+        f",HTTP_PROXY={_proxy}"
+        f",HTTPS_PROXY={_proxy}"
+        f",http_proxy={_proxy}"
+        f",https_proxy={_proxy}"
+    )
+    srun += " --pty bash"
+
+    print(f"Opening interactive session on {ssh_host} in {path_ws or '~'}…")
+    subprocess.run(["ssh", "-t", ssh_host, srun])
+
+
 def _run_platform(args):
     if args.platform_command == "setup":
         _run_platform_setup(args)
     elif args.platform_command == "overview":
         _run_platform_overview(args)
+    elif args.platform_command == "runi":
+        _run_platform_runi(args)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
