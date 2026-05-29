@@ -10,3 +10,11 @@ mesh_type: "mc16_vuni100_r256_fdiff3f"
 #categories:       # null = all categories; list strings to restrict, e.g.:
 #  - hair_dryer
 #  # - mug
+
+# o3x dataset fetch -d hc3d_object_pair  
+# o3x dataset index -d hc3d_object_pair
+# o3x dataset viz -d hc3d_object_pair
+
+# o3x dataset fetch -d hc3d_object_pair -p slurm  
+# o3x dataset index -d hc3d_object_pair -p slurm
+# o3x dataset viz -d hc3d_object_pair -p slurm

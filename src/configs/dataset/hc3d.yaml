@@ -1,3 +1,13 @@
+
+# o3x dataset fetch -d hc3d  
+# o3x dataset index -d hc3d  
+# o3x dataset viz -d hc3d 
+
+
+# o3x dataset fetch -d hc3d -p slurm  
+# o3x dataset index -d hc3d -p slurm
+# o3x dataset viz -d hc3d -p slurm
+
 class_name: HouseCorr3D
 
 # Variable definitions — referenced below with ${...}

@@ -8,7 +8,7 @@ Usage:
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
                                          [--platform PLATFORM]
-  o3x bench run      -b <benchmark> [-p <platform>]
+  o3x bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
   o3x platform setup    -p <platform>
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _build_dataset_parser(sub):
                  "configs/dataset/) or full path to a YAML file",
         )
         q.add_argument(
-            "--platform", default="default", metavar="PLATFORM",
+            "-p", "--platform", default="default", metavar="PLATFORM",
             help="Platform name whose path_datasets_raw / path_datasets_preprocess "
                  "override the dataset config paths (default: default)",
         )
@@ -716,13 +716,12 @@ def _run_platform_runi(args):
     subprocess.run(["ssh", "-t", ssh_host, srun])
 
 
-def _run_platform_run(args):
+def _run_platform_run_cmd(platform: str, command: str) -> None:
     import subprocess
 
-    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(args.platform)
+    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(platform)
 
-    # Build a script that sets up the env and runs the user command.
-    script_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) + [args.command]
+    script_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) + [command]
     remote_script = f"{path_ws}/.od3d_run" if path_ws else "~/.od3d_run"
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_script} && chmod +x {remote_script}"],
@@ -730,8 +729,12 @@ def _run_platform_run(args):
     )
 
     srun += f" bash {remote_script}"
-    print(f"Running on {ssh_host} in {repo_path or path_ws or '~'}: {args.command}")
+    print(f"Running on {ssh_host} in {repo_path or path_ws or '~'}: {command}")
     subprocess.run(["ssh", ssh_host, srun])
+
+
+def _run_platform_run(args):
+    _run_platform_run_cmd(args.platform, args.command)
 
 
 def _run_platform(args):
@@ -769,24 +772,71 @@ def _resolve_bench_config(name_or_path: str) -> Path:
     )
 
 
+def _resolve_ablation(name_or_path: str) -> Path:
+    """Resolve an ablation name/path to a directory or single YAML file.
+
+    Accepts a full/relative path (file or directory) or a short name resolved
+    against src/configs/ablation/ relative to CWD.
+    """
+    p = Path(name_or_path)
+    if p.exists():
+        return p.resolve()
+    candidate = Path.cwd() / "src" / "configs" / "ablation" / name_or_path
+    if candidate.exists():
+        return candidate
+    raise argparse.ArgumentTypeError(
+        f"Ablation not found: {name_or_path!r}\n"
+        f"  Tried: {p.resolve()}\n"
+        f"  Tried: {candidate}"
+    )
+
+
+def _ablation_files(ablation: Path) -> list[Path]:
+    """Return sorted list of YAML files for a dir, or [ablation] for a single file."""
+    if ablation.is_file():
+        return [ablation]
+    return sorted(ablation.glob("*.yaml"))
+
+
+def _repo_rel(path: Path) -> str:
+    """Return path relative to CWD (repo root) when possible, else absolute."""
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
 def _build_bench_parser(sub):
     p = sub.add_parser("bench", help="Benchmark commands")
     bench_sub = p.add_subparsers(dest="bench_command", required=True)
 
-    p_run = bench_sub.add_parser("run", help="Run a benchmark on a dataset")
-    p_run.add_argument(
-        "-b", "--benchmark", required=True, type=_resolve_bench_config, metavar="BENCHMARK",
-        help="Benchmark config name (resolved from src/configs/eval/) or full path to YAML",
-    )
-    p_run.add_argument(
-        "-p", "--platform", default=None, metavar="PLATFORM",
-        help="Override the platform from the benchmark config's defaults list",
-    )
+    def _add_bench_args(q):
+        q.add_argument(
+            "-b", "--benchmark", required=True, type=_resolve_bench_config, metavar="BENCHMARK",
+            help="Benchmark config name (resolved from src/configs/eval/) or full path to YAML",
+        )
+        q.add_argument(
+            "-p", "--platform", default=None, metavar="PLATFORM",
+            help="Override the platform from the benchmark config's defaults list",
+        )
+        q.add_argument(
+            "-a", "--ablation", default=None, type=_resolve_ablation, metavar="ABLATION",
+            help="Ablation dir name (src/configs/ablation/) or path to dir/file; "
+                 "each YAML is merged on top of the benchmark config and run in sequence",
+        )
+
+    p_run = bench_sub.add_parser("run", help="Run benchmark(s) locally")
+    _add_bench_args(p_run)
+
+    p_rrun = bench_sub.add_parser("rrun", help="Submit benchmark(s) as remote jobs via o3x platform run")
+    _add_bench_args(p_rrun)
 
 
 def _run_bench(args) -> None:
     if args.bench_command == "run":
         _run_bench_run(args)
+    elif args.bench_command == "rrun":
+        _run_bench_rrun(args)
 
 
 def _run_bench_run(args) -> None:
@@ -811,68 +861,119 @@ def _run_bench_run(args) -> None:
             default_platform = item.get("platform", default_platform)
             default_dataset  = item.get("dataset",  default_dataset)
 
-    # CLI --platform overrides the defaults entry
     platform = args.platform if args.platform is not None else (default_platform or "default")
 
-    # ── load base dataset config with platform overrides ─────────────────────
+    # ── load base dataset config once (shared across all ablations) ───────────
     overrides = _platform_to_dataset_overrides(platform)
     if default_dataset:
         ds_base = _load_yaml_with_defaults(_resolve_dataset_config(default_dataset), overrides=overrides)
     else:
         ds_base = {}
 
-    # merge eval config's dataset: section on top (eval-specific overrides win)
-    eval_ds_overrides = raw.get("dataset") or {}
-    if eval_ds_overrides:
-        ds_base = OmegaConf.to_container(
-            OmegaConf.merge(OmegaConf.create(ds_base), OmegaConf.create(eval_ds_overrides)),
+    # ── collect ablation files (or a single sentinel for the no-ablation case) ─
+    if args.ablation:
+        ablation_files = _ablation_files(args.ablation)
+        if not ablation_files:
+            print(f"WARNING: no YAML files found in {args.ablation}")
+            return
+    else:
+        ablation_files = [None]
+
+    # ── run once per ablation ─────────────────────────────────────────────────
+    for ablation_file in ablation_files:
+        if ablation_file is not None:
+            with open(ablation_file) as f:
+                ablation = yaml.safe_load(f) or {}
+            run_raw = OmegaConf.to_container(
+                OmegaConf.merge(OmegaConf.create(dict(raw)), OmegaConf.create(ablation)),
+                resolve=True,
+            )
+            print(f"\n{'='*60}")
+            print(f"Ablation: {ablation_file.stem}")
+            print(f"{'='*60}")
+        else:
+            run_raw = raw
+
+        # merge benchmark/ablation dataset section on top of base dataset config
+        run_ds = run_raw.get("dataset") or {}
+        ds_merged = OmegaConf.to_container(
+            OmegaConf.merge(OmegaConf.create(ds_base), OmegaConf.create(run_ds)),
             resolve=True,
+        ) if run_ds else dict(ds_base)
+
+        dataset_cfg = DatasetConfig.from_dict(ds_merged)
+        dataset     = build_dataset(dataset_cfg)
+        print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
+
+        eval_cfg   = run_raw.get("eval", {})
+        batch_size = eval_cfg.get("batch_size", 4)
+
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            collate_fn=collate_object_pairs,
+            shuffle=False,
+            num_workers=0,
         )
 
-    dataset_cfg = DatasetConfig.from_dict(ds_base)
+        task_cfg = OmegaConf.create(run_raw["task"])
+        task     = build_task(task_cfg)
+        print(f"Task:    {run_raw['task']['class_name']}")
+        print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
 
-    dataset = build_dataset(dataset_cfg)
-    print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
+        accum: dict[str, list] = {}
+        n_samples = 0
 
-    eval_cfg   = raw.get("eval", {})
-    batch_size = eval_cfg.get("batch_size", 4)
+        for batch_idx, batch in enumerate(loader):
+            quant, _ = task(batch)
 
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        collate_fn=collate_object_pairs,
-        shuffle=False,
-        num_workers=0,
-    )
+            B = (batch.src_obj_kpts3d.shape[0]
+                 if batch.src_obj_kpts3d is not None else batch_size)
+            n_samples += B
 
-    task_cfg = OmegaConf.create(raw["task"])
-    task     = build_task(task_cfg)
-    print(f"Task:    {raw['task']['class_name']}")
-    print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
+            for metric_name, values in quant.mean().items():
+                accum.setdefault(metric_name, []).append(values)
 
-    accum: dict[str, list] = {}
-    n_samples = 0
+            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader):
+                print(f"  [{batch_idx + 1:4d}/{len(loader)}]  samples={n_samples}", end="")
+                for k, vals in accum.items():
+                    print(f"  {k}={sum(vals)/len(vals):.4f}", end="")
+                print()
 
-    for batch_idx, batch in enumerate(loader):
-        quant, _ = task(batch)
+        print(f"\n{'─'*50}")
+        print(f"Results  ({n_samples} samples)")
+        for k, vals in accum.items():
+            print(f"  {k:<25} {sum(vals)/len(vals):.4f}")
 
-        B = (batch.src_obj_kpts3d.shape[0]
-             if batch.src_obj_kpts3d is not None else batch_size)
-        n_samples += B
 
-        for metric_name, values in quant.mean().items():
-            accum.setdefault(metric_name, []).append(values)
+def _run_bench_rrun(args) -> None:
+    """Submit each benchmark/ablation run as a separate remote job."""
+    import shlex
 
-        if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader):
-            print(f"  [{batch_idx + 1:4d}/{len(loader)}]  samples={n_samples}", end="")
-            for k, vals in accum.items():
-                print(f"  {k}={sum(vals)/len(vals):.4f}", end="")
-            print()
+    platform = args.platform or "slurm"
 
-    print(f"\n{'─'*50}")
-    print(f"Results  ({n_samples} samples)")
-    for k, vals in accum.items():
-        print(f"  {k:<25} {sum(vals)/len(vals):.4f}")
+    if args.ablation:
+        files = _ablation_files(args.ablation)
+        if not files:
+            print(f"WARNING: no YAML files found in {args.ablation}")
+            return
+    else:
+        files = [None]
+
+    for ablation_file in files:
+        parts = ["o3x", "bench", "run",
+                 "-b", _repo_rel(args.benchmark),
+                 "-p", platform]
+        if ablation_file is not None:
+            parts += ["-a", _repo_rel(ablation_file)]
+        remote_cmd = " ".join(shlex.quote(p) for p in parts)
+
+        if ablation_file is not None:
+            print(f"\nSubmitting ablation '{ablation_file.stem}': {remote_cmd}")
+        else:
+            print(f"\nSubmitting: {remote_cmd}")
+
+        _run_platform_run_cmd(platform, remote_cmd)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
