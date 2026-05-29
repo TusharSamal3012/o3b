@@ -946,11 +946,109 @@ def _run_bench_run(args) -> None:
             print(f"  {k:<25} {sum(vals)/len(vals):.4f}")
 
 
+def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
+    """Upload a run script + sbatch wrapper and submit via sbatch."""
+    import os, re, subprocess
+    from omegaconf import OmegaConf
+
+    cfg, _ = _load_platform_config(platform)
+
+    ssh_host = cfg.get("ssh")
+    if not ssh_host or ssh_host is False:
+        raise ValueError(f"Platform '{platform}' has no ssh host configured")
+
+    path_ws        = cfg.get("path_ws", "")
+    path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
+    python_version = str(cfg.get("python_version", "3.10"))
+    torch_version  = str(cfg.get("torch_version", "2.6.0"))
+    install_diff3f = "true" if cfg.get("install_diff3f", False) else "false"
+    setup          = "true" if cfg.get("setup", False) else "false"
+    branch         = str(cfg.get("branch", "main"))
+    pull           = str(cfg.get("pull", True)).lower()
+    pull_subs      = str(cfg.get("pull_submodules", True)).lower()
+    path_home      = cfg.get("path_home", path_ws)
+
+    cuda_tag  = "cu" + os.path.basename(path_cuda).replace("cuda-", "").replace(".", "")
+    py_tag    = "py" + python_version.replace(".", "")
+    torch_tag = "torch" + ".".join(torch_version.split(".")[:2]).replace(".", "")
+
+    token = OmegaConf.select(cfg, "credentials.github.token", default="") or ""
+    try:
+        submodule_root = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], text=True, cwd=Path(__file__).parent,
+        ).strip()
+        superproject = subprocess.check_output(
+            ["git", "rev-parse", "--show-superproject-working-tree"], text=True, cwd=submodule_root,
+        ).strip()
+        local_repo_root = superproject if superproject else submodule_root
+        raw_remote = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"], text=True, cwd=local_repo_root,
+        ).strip()
+        if raw_remote.startswith("git@"):
+            raw_remote = re.sub(r"git@github\.com:", "https://github.com/", raw_remote)
+        plain    = re.sub(r"https://[^@]+@", "https://", raw_remote)
+        repo_url  = plain.replace("https://", f"https://{token}@") if token else plain
+        repo_name = Path(re.sub(r"\.git$", "", plain.split("/")[-1])).name
+    except subprocess.CalledProcessError:
+        repo_url  = ""
+        repo_name = ""
+
+    repo_path = f"{path_ws}/{repo_name}" if (path_ws and repo_name) else path_ws
+    venv_path = f"{repo_path}/venv_{py_tag}_{cuda_tag}_{torch_tag}" if repo_path else ""
+
+    _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
+    env_vars = {
+        "PATH_WS":         path_ws,
+        "PATH_CUDA":       path_cuda,
+        "PYTHON_VERSION":  python_version,
+        "TORCH_VERSION":   torch_version,
+        "INSTALL_DIFF3F":  install_diff3f,
+        "REPO_URL":        repo_url,
+        "REPO_NAME":       repo_name,
+        "SETUP":           setup,
+        "BRANCH":          branch,
+        "PULL":            pull,
+        "PULL_SUBMODULES": pull_subs,
+        "HTTP_PROXY":      _proxy,
+        "HTTPS_PROXY":     _proxy,
+        "http_proxy":      _proxy,
+        "https_proxy":     _proxy,
+    }
+
+    # run script: env preamble (CUDA, venv, cd, setup/pull) + the actual command
+    run_script_lines = ["#!/usr/bin/env bash", "set -euo pipefail", ""] + \
+                       _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) + \
+                       ["", command]
+    remote_run_script = f"{path_ws}/.od3d_bench_run.sh"
+
+    sbatch_script = _make_sbatch_script(
+        cfg,
+        job_name=job_name,
+        env_vars=env_vars,
+        remote_setup_script=remote_run_script,
+    )
+    remote_sbatch = f"{path_ws}/.od3d_bench_sbatch.sh"
+
+    subprocess.run(
+        ["ssh", ssh_host, f"cat > {remote_run_script} && chmod +x {remote_run_script}"],
+        input="\n".join(run_script_lines), text=True, check=True,
+    )
+    subprocess.run(
+        ["ssh", ssh_host, f"cat > {remote_sbatch} && chmod +x {remote_sbatch}"],
+        input=sbatch_script, text=True, check=True,
+    )
+
+    remote_submit = f"mkdir -p {path_home}/slurm_jobs && sbatch {remote_sbatch}"
+    print(f"Submitting sbatch job '{job_name}' on {ssh_host}…")
+    subprocess.run(["ssh", ssh_host, remote_submit], check=True)
+
+
 def _run_bench_rrun(args) -> None:
-    """Submit each benchmark/ablation run as a separate remote job."""
+    """Submit each benchmark/ablation run as a separate sbatch job."""
     import shlex
 
     platform = args.platform or "slurm"
+    bench_stem = args.benchmark.stem
 
     if args.ablation:
         files = _ablation_files(args.ablation)
@@ -966,14 +1064,14 @@ def _run_bench_rrun(args) -> None:
                  "-p", platform]
         if ablation_file is not None:
             parts += ["-a", _repo_rel(ablation_file)]
+            job_name = f"{bench_stem}__{ablation_file.stem}"
+        else:
+            job_name = bench_stem
         remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
-        if ablation_file is not None:
-            print(f"\nSubmitting ablation '{ablation_file.stem}': {remote_cmd}")
-        else:
-            print(f"\nSubmitting: {remote_cmd}")
-
-        _run_platform_run_cmd(platform, remote_cmd)
+        print(f"\nSubmitting '{job_name}': {remote_cmd}")
+        _run_bench_sbatch_cmd(platform, remote_cmd, job_name)
+        print(f"  → submitted")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
