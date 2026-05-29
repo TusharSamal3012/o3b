@@ -582,6 +582,7 @@ def _platform_srun_context(platform: str):
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
     install_diff3f = "true" if cfg.get("install_diff3f", False) else "false"
+    setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
     pull_subs      = str(cfg.get("pull_submodules", True)).lower()
@@ -644,6 +645,7 @@ def _platform_srun_context(platform: str):
         f",INSTALL_DIFF3F={install_diff3f}"
         f",REPO_URL={repo_url}"
         f",REPO_NAME={repo_name}"
+        f",SETUP={setup}"
         f",BRANCH={branch}"
         f",PULL={pull}"
         f",PULL_SUBMODULES={pull_subs}"
@@ -654,8 +656,14 @@ def _platform_srun_context(platform: str):
     return ssh_host, srun, repo_path, venv_path, path_cuda, path_ws
 
 
-def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str) -> list[str]:
-    """Shell lines that set up CUDA env, activate the venv, and cd into the repo."""
+def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str) -> list[str]:
+    """Shell lines that run on the compute node before the actual command.
+
+    Order: CUDA env → conditional setup script → conditional pull/checkout
+           → venv activation → cd into repo.
+    The SETUP / PULL / PULL_SUBMODULES / BRANCH values come from the srun
+    --export env vars so the same script works regardless of platform config.
+    """
     lines = [
         "[ -f ~/.bashrc ] && . ~/.bashrc",
         f"export PATH={path_cuda}/bin:$PATH",
@@ -663,6 +671,25 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str) -> list[str]
         f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
         f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/x86_64-linux/lib",
     ]
+    # run full setup script (e.g. install deps) when SETUP=true
+    if path_ws:
+        lines += [
+            f'if [ "${{SETUP:-false}}" = "true" ]; then',
+            f'    bash {path_ws}/setup_slurm.sh',
+            f'fi',
+        ]
+    # checkout branch and pull when PULL=true
+    if repo_path:
+        lines += [
+            f'if [ "${{PULL:-false}}" = "true" ]; then',
+            f'    git -C {repo_path} fetch',
+            f'    git -C {repo_path} checkout "${{BRANCH:-main}}"',
+            f'    git -C {repo_path} pull',
+            f'fi',
+            f'if [ "${{PULL_SUBMODULES:-false}}" = "true" ]; then',
+            f'    git -C {repo_path} submodule update --init --recursive',
+            f'fi',
+        ]
     if venv_path:
         lines.append(f"[ -d {venv_path} ] && source {venv_path}/bin/activate")
     if repo_path:
@@ -677,7 +704,7 @@ def _run_platform_runi(args):
 
     # Write a small activation script so bash --init-file can source it without
     # wrapping srun in a bash -c subshell (which breaks the PTY).
-    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path)
+    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws)
     remote_init = f"{path_ws}/.od3d_init" if path_ws else "~/.od3d_init"
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_init}"],
@@ -695,7 +722,7 @@ def _run_platform_run(args):
     ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(args.platform)
 
     # Build a script that sets up the env and runs the user command.
-    script_lines = _srun_env_lines(path_cuda, venv_path, repo_path) + [args.command]
+    script_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) + [args.command]
     remote_script = f"{path_ws}/.od3d_run" if path_ws else "~/.od3d_run"
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_script} && chmod +x {remote_script}"],
