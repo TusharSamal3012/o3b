@@ -20,6 +20,7 @@ dependencies = [
     "PyYAML>=6.0",
     "viser>=0.2",
     "trimesh>=4.0",
+    "wandb",
 ]
 
 [project.scripts]

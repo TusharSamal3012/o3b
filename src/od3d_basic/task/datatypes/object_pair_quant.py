@@ -34,3 +34,24 @@ class ObjectPairQuantBatch:
             if v is not None and hasattr(v, "mean"):
                 out[k] = v.mean().item()
         return out
+
+    def to_wandb_log(self, prefix: str = "batch", wb=None) -> dict:
+        """Return a dict ready for wandb.log().
+
+        Scalar means are always included.  Per-keypoint distance tensors are
+        logged as wandb.Histogram objects when *wb* is provided.
+        """
+        out: dict = {f"{prefix}/{k}": v for k, v in self.mean().items()}
+        if wb is None:
+            return out
+        for fname in ("kpts_euc_dist", "kpts_geo_dist"):
+            val = getattr(self, fname)
+            if val is None:
+                continue
+            if self.kpts_mask is not None:
+                data = val[self.kpts_mask].detach().cpu().float().numpy()
+            else:
+                data = val.detach().cpu().float().flatten().numpy()
+            if data.size:
+                out[f"{prefix}/{fname}"] = wb.Histogram(data)
+        return out

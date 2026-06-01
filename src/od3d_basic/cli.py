@@ -10,6 +10,7 @@ Usage:
                                          [--platform PLATFORM]
   o3x bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
   o3x platform setup    -p <platform>
+  o3x platform stop  -p <platform> [-y]
 """
 from __future__ import annotations
 
@@ -128,6 +129,19 @@ def _build_platform_parser(sub):
     p_run.add_argument(
         "-c", "--command", required=True, metavar="CMD",
         help="Shell command to execute on the compute node",
+    )
+
+    p_stop = plat_sub.add_parser(
+        "stop",
+        help="Cancel all running jobs on the platform's configured partition",
+    )
+    p_stop.add_argument(
+        "-p", "--platform", default="slurm", metavar="PLATFORM",
+        help="Platform name matching a config in configs/platform/ (default: slurm)",
+    )
+    p_stop.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip confirmation prompt",
     )
 
 
@@ -737,6 +751,58 @@ def _run_platform_run(args):
     _run_platform_run_cmd(args.platform, args.command)
 
 
+def _run_platform_stop(args) -> None:
+    import subprocess
+
+    platform = args.platform
+    cfg, _   = _load_platform_config(platform)
+
+    ssh_host = cfg.get("ssh")
+    if not ssh_host or ssh_host is False:
+        raise ValueError(
+            f"Platform '{platform}' has no ssh host configured (ssh: {ssh_host!r})"
+        )
+
+    username  = cfg.get("username", "")
+    partition = cfg.get("partition", None)
+
+    # Show the jobs that would be cancelled before asking for confirmation.
+    squeue_cmd = "squeue --format='%.10i %.12P %.30j %.10T %.12M'"
+    if username:
+        squeue_cmd += f" -u {username}"
+    if partition:
+        squeue_cmd += f" -p {partition}"
+
+    info = (f"partition={partition}" if partition else "") + \
+           (f"  user={username}" if username else "")
+    print(f"Querying jobs on {ssh_host}  [{info.strip()}]…")
+    result = subprocess.run(["ssh", ssh_host, squeue_cmd], capture_output=True, text=True)
+    lines = result.stdout.strip().splitlines()
+
+    if len(lines) <= 1:
+        print("No running jobs found.")
+        return
+
+    print(result.stdout.strip())
+    n_jobs = len(lines) - 1  # subtract header
+
+    if not args.yes:
+        print(f"\nCancel all {n_jobs} job(s)? [y/N] ", end="", flush=True)
+        if input().strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    scancel_cmd = "scancel"
+    if username:
+        scancel_cmd += f" -u {username}"
+    if partition:
+        scancel_cmd += f" -p {partition}"
+
+    print(f"Running: {scancel_cmd}")
+    subprocess.run(["ssh", ssh_host, scancel_cmd], check=True)
+    print(f"Cancelled {n_jobs} job(s).")
+
+
 def _run_platform(args):
     if args.platform_command == "setup":
         _run_platform_setup(args)
@@ -746,6 +812,8 @@ def _run_platform(args):
         _run_platform_runi(args)
     elif args.platform_command == "run":
         _run_platform_run(args)
+    elif args.platform_command == "stop":
+        _run_platform_stop(args)
 
 
 # ── bench sub-parser ──────────────────────────────────────────────────────────
@@ -841,13 +909,11 @@ def _run_bench(args) -> None:
 
 def _run_bench_run(args) -> None:
     import yaml
-    from torch.utils.data import DataLoader
-
-    from od3d_basic.dataset.dataset import DatasetConfig, build_dataset, _load_yaml_with_defaults
-    from od3d_basic.dataset.cli import _platform_to_dataset_overrides, _resolve_dataset_config
-    from od3d_basic.task.task import build_task
-    from od3d_basic.data.datatypes.object import collate_object_pairs
     from omegaconf import OmegaConf
+
+    from od3d_basic.dataset.dataset import _load_yaml_with_defaults
+    from od3d_basic.dataset.cli import _platform_to_dataset_overrides, _resolve_dataset_config
+    from od3d_basic.run import _run_bench_run_with_cfg
 
     with open(args.benchmark) as f:
         raw = yaml.safe_load(f)
@@ -901,49 +967,8 @@ def _run_bench_run(args) -> None:
             resolve=True,
         ) if run_ds else dict(ds_base)
 
-        dataset_cfg = DatasetConfig.from_dict(ds_merged)
-        dataset     = build_dataset(dataset_cfg)
-        print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
-
-        eval_cfg   = run_raw.get("eval", {})
-        batch_size = eval_cfg.get("batch_size", 4)
-
-        loader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            collate_fn=collate_object_pairs,
-            shuffle=False,
-            num_workers=0,
-        )
-
-        task_cfg = OmegaConf.create(run_raw["task"])
-        task     = build_task(task_cfg)
-        print(f"Task:    {run_raw['task']['class_name']}")
-        print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
-
-        accum: dict[str, list] = {}
-        n_samples = 0
-
-        for batch_idx, batch in enumerate(loader):
-            quant, _ = task(batch)
-
-            B = (batch.src_obj_kpts3d.shape[0]
-                 if batch.src_obj_kpts3d is not None else batch_size)
-            n_samples += B
-
-            for metric_name, values in quant.mean().items():
-                accum.setdefault(metric_name, []).append(values)
-
-            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader):
-                print(f"  [{batch_idx + 1:4d}/{len(loader)}]  samples={n_samples}", end="")
-                for k, vals in accum.items():
-                    print(f"  {k}={sum(vals)/len(vals):.4f}", end="")
-                print()
-
-        print(f"\n{'─'*50}")
-        print(f"Results  ({n_samples} samples)")
-        for k, vals in accum.items():
-            print(f"  {k:<25} {sum(vals)/len(vals):.4f}")
+        run_name = ablation_file.stem if ablation_file else args.benchmark.stem
+        _run_bench_run_with_cfg({**run_raw, "dataset": ds_merged}, run_name)
 
 
 def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:

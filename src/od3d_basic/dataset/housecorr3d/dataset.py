@@ -46,60 +46,60 @@ class HouseCorr3D(ConfigurableDataset):
         db_path = self.path_preprocess / "index.db"
         if not db_path.exists():
             return
-        con = sqlite3.connect(db_path)
+        # immutable=1: skip WAL/-shm entirely (safe here — _setup only reads).
+        # mode=ro alone still needs the -shm file, which fails on read-only
+        # Slurm filesystems even for plain SELECTs.
+        con = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True, timeout=30)
         con.row_factory = sqlite3.Row
-        cur = con.cursor()
+        try:
+            cur = con.cursor()
 
-        self._object_rows = [dict(r) for r in cur.execute("SELECT * FROM objects").fetchall()]
-        _id_to_idx: dict[str, int] = {r["object_id"]: i for i, r in enumerate(self._object_rows)}
+            self._object_rows = [dict(r) for r in cur.execute("SELECT * FROM objects").fetchall()]
+            _id_to_idx: dict[str, int] = {r["object_id"]: i for i, r in enumerate(self._object_rows)}
 
-        cats = self.cfg.categories  # Optional[list[str]]
+            cats = self.cfg.categories  # Optional[list[str]]
 
-        if self.cfg.item_type == ItemType.OBJECT:
-            kpts_clause  = " AND obj_kpts3d IS NOT NULL" if self.cfg.filter_has_kpts else ""
-            limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
-            if cats:
-                placeholders = ", ".join("?" * len(cats))
-                cat_clause   = f" AND category IN ({placeholders})"
-                params: list = list(cats)
-            else:
-                cat_clause, params = "", []
-            rows = cur.execute(
-                f"SELECT object_id FROM objects WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}",
-                params,
-            ).fetchall()
-            self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
+            if self.cfg.item_type == ItemType.OBJECT:
+                kpts_clause  = " AND obj_kpts3d IS NOT NULL" if self.cfg.filter_has_kpts else ""
+                limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
+                if cats:
+                    placeholders = ", ".join("?" * len(cats))
+                    cat_clause   = f" AND category IN ({placeholders})"
+                    params: list = list(cats)
+                else:
+                    cat_clause, params = "", []
+                rows = cur.execute(
+                    f"SELECT object_id FROM objects WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}",
+                    params,
+                ).fetchall()
+                self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
 
-        elif self.cfg.item_type == ItemType.OBJECT_PAIR:
-            kpts_clause = (
-                " AND src_o.obj_kpts3d IS NOT NULL AND trgt_o.obj_kpts3d IS NOT NULL"
-                if self.cfg.filter_has_kpts else ""
-            )
-            limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
-            if cats:
-                placeholders = ", ".join("?" * len(cats))
-                cat_clause   = (f" AND src_o.category IN ({placeholders})"
-                                f" AND trgt_o.category IN ({placeholders})")
-                params = list(cats) + list(cats)
-            else:
-                cat_clause, params = "", []
-            rows = cur.execute(f"""
-                SELECT op.src_object_id, op.trgt_object_id
-                FROM object_pairs op
-                JOIN objects src_o  ON op.src_object_id  = src_o.object_id
-                JOIN objects trgt_o ON op.trgt_object_id = trgt_o.object_id
-                WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}
-            """, params).fetchall()
-            self._object_rows_id = [
-                (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])
-                for r in rows
-            ]
-
-        else:
+            elif self.cfg.item_type == ItemType.OBJECT_PAIR:
+                kpts_clause = (
+                    " AND src_o.obj_kpts3d IS NOT NULL AND trgt_o.obj_kpts3d IS NOT NULL"
+                    if self.cfg.filter_has_kpts else ""
+                )
+                limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
+                if cats:
+                    placeholders = ", ".join("?" * len(cats))
+                    cat_clause   = (f" AND src_o.category IN ({placeholders})"
+                                    f" AND trgt_o.category IN ({placeholders})")
+                    params = list(cats) + list(cats)
+                else:
+                    cat_clause, params = "", []
+                rows = cur.execute(f"""
+                    SELECT op.src_object_id, op.trgt_object_id
+                    FROM object_pairs op
+                    JOIN objects src_o  ON op.src_object_id  = src_o.object_id
+                    JOIN objects trgt_o ON op.trgt_object_id = trgt_o.object_id
+                    WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}
+                """, params).fetchall()
+                self._object_rows_id = [
+                    (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])
+                    for r in rows
+                ]
+        finally:
             con.close()
-            return
-
-        con.close()
 
     def _load_object(self, idx: int) -> Object:
         return self._load_object_from_row(self._object_rows[self._object_rows_id[idx]])

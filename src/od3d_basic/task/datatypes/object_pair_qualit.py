@@ -22,3 +22,26 @@ class ObjectPairQualitBatch:
 
     # extra per-task qualitative outputs
     extra: dict = field(default_factory=dict)
+
+    def to_wandb_log(
+        self,
+        prefix: str = "qualit",
+        wb=None,
+        log_imgs: bool = True,
+    ) -> dict:
+        """Return a dict ready for wandb.log().
+
+        Images in *imgs* are included when *log_imgs* is True and *wb* is
+        provided.  Extra tensor fields are skipped (not meaningful in W&B).
+        """
+        out: dict = {}
+        if wb is None or not log_imgs or self.imgs is None:
+            return out
+        out[f"{prefix}/correspondences"] = [
+            wb.Image(
+                img.permute(1, 2, 0).detach().cpu().float().numpy(),
+                caption=f"i{i}",
+            )
+            for i, img in enumerate(self.imgs)
+        ]
+        return out
