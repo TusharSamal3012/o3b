@@ -447,6 +447,8 @@ class ObjectPairBatch:
     trgt_verts3d_feats:           Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
     trgt_verts3d_feats_mask:      Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
     trgt_mesh:                    Optional[Mesh]   = None  # shared mesh for all B trgt samples
+    src_meshes:                   Optional[list]   = None  # list of B Mesh objects (per-sample)
+    trgt_meshes:                  Optional[list]   = None  # list of B Mesh objects (per-sample)
     trgt_obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
     trgt_obj_kpts3d:              Optional[Tensor] = None  # (B, K, 3)
     trgt_obj_kpts3d_mask:         Optional[Tensor] = None  # (B, K)    bool
@@ -496,6 +498,11 @@ def collate_object_pairs(
     trgt_verts3d_feats, _trgt_feats_pad_mask = _get_pad("verts3d_feats",       "trgt")
     _trgt_feats_mask_raw, _                  = _get_pad("verts3d_feats_mask",  "trgt")
 
+    _src_meshes  = [s.src_object.mesh  for s in samples]
+    _trgt_meshes = [s.trgt_object.mesh for s in samples]
+    src_meshes_list  = _src_meshes  if any(m is not None for m in _src_meshes)  else None
+    trgt_meshes_list = _trgt_meshes if any(m is not None for m in _trgt_meshes) else None
+
     return ObjectPairBatch(
         src_pts3d                   = _get("pts3d",                   "src"),
         src_pts3d_feats             = _get("pts3d_feats",             "src"),
@@ -503,6 +510,7 @@ def collate_object_pairs(
         src_verts3d                 = src_verts3d,
         src_verts3d_feats           = src_verts3d_feats,
         src_verts3d_feats_mask      = _merge_masks(_src_feats_pad_mask, _src_feats_mask_raw),
+        src_meshes                  = src_meshes_list,
         src_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","src"),
         src_obj_kpts3d              = _get("obj_kpts3d",              "src"),
         src_obj_kpts3d_mask         = _get("obj_kpts3d_mask",         "src"),
@@ -513,6 +521,7 @@ def collate_object_pairs(
         trgt_verts3d                 = trgt_verts3d,
         trgt_verts3d_feats           = trgt_verts3d_feats,
         trgt_verts3d_feats_mask      = _merge_masks(_trgt_feats_pad_mask, _trgt_feats_mask_raw),
+        trgt_meshes                  = trgt_meshes_list,
         trgt_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","trgt"),
         trgt_obj_kpts3d              = _get("obj_kpts3d",              "trgt"),
         trgt_obj_kpts3d_mask         = _get("obj_kpts3d_mask",         "trgt"),

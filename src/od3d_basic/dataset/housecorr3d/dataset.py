@@ -60,7 +60,12 @@ class HouseCorr3D(ConfigurableDataset):
             cats = self.cfg.categories  # Optional[list[str]]
 
             if self.cfg.item_type == ItemType.OBJECT:
-                kpts_clause  = " AND obj_kpts3d IS NOT NULL" if self.cfg.filter_has_kpts else ""
+                kpts_clause = " AND obj_kpts3d IS NOT NULL" if self.cfg.filter_has_kpts else ""
+                real_clause = (
+                    " AND object_id LIKE '%real%'"
+                    if self.cfg.filter_is_real else
+                    " AND object_id NOT LIKE '%real%'"
+                )
                 limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
                 if cats:
                     placeholders = ", ".join("?" * len(cats))
@@ -69,7 +74,7 @@ class HouseCorr3D(ConfigurableDataset):
                 else:
                     cat_clause, params = "", []
                 rows = cur.execute(
-                    f"SELECT object_id FROM objects WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}",
+                    f"SELECT object_id FROM objects WHERE 1=1{kpts_clause}{real_clause}{cat_clause}{limit_clause}",
                     params,
                 ).fetchall()
                 self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
@@ -78,6 +83,11 @@ class HouseCorr3D(ConfigurableDataset):
                 kpts_clause = (
                     " AND src_o.obj_kpts3d IS NOT NULL AND trgt_o.obj_kpts3d IS NOT NULL"
                     if self.cfg.filter_has_kpts else ""
+                )
+                real_clause = (
+                    " AND src_o.object_id LIKE '%real%' AND trgt_o.object_id LIKE '%real%'"
+                    if self.cfg.filter_is_real else
+                    " AND src_o.object_id NOT LIKE '%real%' AND trgt_o.object_id NOT LIKE '%real%'"
                 )
                 limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
                 if cats:
@@ -92,7 +102,7 @@ class HouseCorr3D(ConfigurableDataset):
                     FROM object_pairs op
                     JOIN objects src_o  ON op.src_object_id  = src_o.object_id
                     JOIN objects trgt_o ON op.trgt_object_id = trgt_o.object_id
-                    WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}
+                    WHERE 1=1{kpts_clause}{real_clause}{cat_clause}{limit_clause}
                 """, params).fetchall()
                 self._object_rows_id = [
                     (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])

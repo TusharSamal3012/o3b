@@ -20,119 +20,144 @@ def _render_corr_imgs(
     valid:       Tensor,            # (B, K) bool
     src_mask:    Optional[Tensor],  # (B, V) bool — non-padding vertices
     trgt_mask:   Optional[Tensor],  # (B, V) bool — non-padding vertices
+    src_meshes:  Optional[list] = None,   # list of B Mesh objects (per-sample)
+    trgt_meshes: Optional[list] = None,   # list of B Mesh objects (per-sample)
     H: int = 256,
     W: int = 256,
 ) -> Optional[Tensor]:
     """Return (B, 3, H, 2*W) float32 [0,1] images.
 
-    Left panel: target object point cloud with target keypoints (filled circles).
-    Right panel: source object point cloud with GT src kpts (open rings) and
-                 predicted src positions (filled circles, same colour as trgt kpt).
-    Coloured lines cross the centre separator to connect each target keypoint to
-    its predicted source position, visualising correspondence quality.
+    Left panel: target mesh with target keypoints (filled circles).
+    Right panel: source mesh with GT src kpts (open rings) and
+                 predicted src positions (filled circles).
+    Lines connect each target keypoint to its predicted source position:
+        green = correct (error < 0.1 * trgt_max_dim), red = wrong.
     """
     try:
         import numpy as np
-        import colorsys
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFont
+        from od3d_basic.io import _mesh_to_trimesh
+        from od3d_basic.cv.visual.show import (
+            render_trimesh_to_tensor,
+            get_default_camera_intrinsics_from_img_size,
+        )
+        from od3d_basic.cv.geometry.transform import get_cam_tform4x4_obj_for_viewpoints_count
     except ImportError:
         return None
 
     B, K, _ = src_kpts.shape
     imgs_out = []
-    margin = 14
     r_dot = max(4, H // 52)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", max(10, H // 24))
+    except Exception:
+        font = ImageFont.load_default()
+
+    # two cameras: front-right and back-left (objects in normalized [-1,1] space)
+    cam_ts = get_cam_tform4x4_obj_for_viewpoints_count(viewpoints_count=2, dist=5.0).float()
+    cam_k  = get_default_camera_intrinsics_from_img_size(W, H, fov_x=25).float()
+    fx  = cam_k[0, 0].item()
+    fy  = cam_k[1, 1].item()
+    cx_k = cam_k[0, 2].item()
+    cy_k = cam_k[1, 2].item()
+
+    def project(pts_3d: Tensor, cam_t: Tensor):
+        """Project (N, 3) points → (u_arr, v_arr) pixel arrays (Open3D cam convention)."""
+        pts_h = torch.cat([pts_3d.float().cpu(), torch.ones(len(pts_3d), 1)], dim=1)
+        pts_cam = (cam_t @ pts_h.T).T[:, :3]
+        z = pts_cam[:, 2].clamp(min=1e-6).numpy()
+        u = fx * pts_cam[:, 0].numpy() / z + cx_k
+        v = fy * pts_cam[:, 1].numpy() / z + cy_k
+        return u, v
+
+    def render_panel(mesh, cam_t: Tensor) -> np.ndarray:
+        """Render one panel from cam_t; returns (H, W, 3) uint8."""
+        if mesh is not None:
+            try:
+                rgb, _ = render_trimesh_to_tensor(
+                    _mesh_to_trimesh(mesh), cam_k, cam_t, H, W,
+                    rgb_bg=[0.92, 0.92, 0.92],
+                )
+                return (rgb.permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+            except Exception:
+                pass
+        return np.full((H, W, 3), 235, dtype=np.uint8)
 
     for b in range(B):
-        sv = src_verts[b].float().cpu()    # (V, 3)
-        tv = trgt_verts[b].float().cpu()   # (V, 3)
-        sk = src_kpts[b].float().cpu()     # (K, 3)
-        tk = trgt_kpts[b].float().cpu()    # (K, 3)
-        pk = pred_src[b].float().cpu()     # (K, 3)
-        vm = valid[b].cpu()               # (K,) bool
+        sk = src_kpts[b].float().cpu()
+        tk = trgt_kpts[b].float().cpu()
+        pk = pred_src[b].float().cpu()
+        vm = valid[b].cpu()
 
-        # filter out padding vertices
-        if src_mask is not None:
-            sv = sv[src_mask[b].cpu()]
+        # per-sample trgt bounding-box size for correctness threshold
+        tv_b = trgt_verts[b].float().cpu()
         if trgt_mask is not None:
-            tv = tv[trgt_mask[b].cpu()]
+            tv_b = tv_b[trgt_mask[b].cpu()]
+        trgt_max_dim = (
+            (tv_b.max(0).values - tv_b.min(0).values).max().item()
+            if tv_b.shape[0] > 0 else 1.0
+        )
+        threshold = 0.1 * trgt_max_dim
+        is_correct = ((pk - sk).norm(dim=-1) < threshold)  # (K,)
 
-        # common scale from both objects + keypoints so they are comparable
-        ref_pts = torch.cat([sv, tv, sk[vm], tk[vm], pk[vm]], dim=0) if vm.any() else torch.cat([sv, tv], dim=0)
-        if ref_pts.shape[0] == 0:
-            imgs_out.append(torch.ones(3, H, 2 * W))
-            continue
-        mn = ref_pts.min(0).values
-        mx = ref_pts.max(0).values
-        scale = (mx - mn).max().clamp(min=1e-6).item()
-        cx = ((mn[0] + mx[0]) / 2).item()
-        cy = ((mn[1] + mx[1]) / 2).item()
+        sm = src_meshes[b]  if (src_meshes  is not None) else None
+        tm = trgt_meshes[b] if (trgt_meshes is not None) else None
 
-        def to_px(pts: Tensor, x_offset: int = 0):
-            p = pts.numpy()
-            u = ((p[:, 0] - cx) / scale + 0.5) * (W - 2 * margin) + margin + x_offset
-            v = (-(p[:, 1] - cy) / scale + 0.5) * (H - 2 * margin) + margin
-            return (
-                u.clip(0, 2 * W - 1).astype(int),
-                v.clip(0, H - 1).astype(int),
-            )
+        # build one row per viewpoint, stack vertically → (2H, 2W, 3)
+        rows = []
+        for v_idx in range(cam_ts.shape[0]):
+            cam_t = cam_ts[v_idx]
 
-        canvas = np.full((H, 2 * W, 3), 235, dtype=np.uint8)
-        img_pil = Image.fromarray(canvas)
-        draw = ImageDraw.Draw(img_pil)
+            trgt_panel = render_panel(tm, cam_t)
+            src_panel  = render_panel(sm, cam_t)
 
-        # vertical separator
-        draw.line([(W, 0), (W, H - 1)], fill=(150, 150, 150), width=2)
+            row_arr = np.concatenate([trgt_panel, src_panel], axis=1)  # (H, 2W, 3)
+            row_pil = Image.fromarray(row_arr)
+            draw = ImageDraw.Draw(row_pil)
 
-        # draw vertex point clouds
-        if tv.shape[0] > 0:
-            us, vs = to_px(tv, x_offset=0)
-            for u, v in zip(us, vs):
-                draw.ellipse([(u, v), (u + 1, v + 1)], fill=(185, 185, 185))
+            draw.line([(W, 0), (W, H - 1)], fill=(120, 120, 120), width=2)
 
-        if sv.shape[0] > 0:
-            us, vs = to_px(sv, x_offset=W)
-            for u, v in zip(us, vs):
-                draw.ellipse([(u, v), (u + 1, v + 1)], fill=(185, 185, 185))
+            tk_u, tk_v = project(tk, cam_t)
+            pk_u, pk_v = project(pk, cam_t)
+            sk_u, sk_v = project(sk, cam_t)
 
-        # draw correspondences
-        for k in range(K):
-            if not bool(vm[k]):
-                continue
-            rf, gf, bf = colorsys.hsv_to_rgb(k / max(K, 1), 0.88, 0.85)
-            color = (int(rf * 255), int(gf * 255), int(bf * 255))
+            for k_i in range(K):
+                if not bool(vm[k_i]):
+                    continue
+                color = (0, 180, 0) if bool(is_correct[k_i]) else (0, 0, 200)
 
-            tk_u, tk_v = to_px(tk[k: k + 1], x_offset=0)
-            pk_u, pk_v = to_px(pk[k: k + 1], x_offset=W)
-            sk_u, sk_v = to_px(sk[k: k + 1], x_offset=W)
+                tku = int(np.clip(tk_u[k_i], 0, W - 1))
+                tkv = int(np.clip(tk_v[k_i], 0, H - 1))
+                pku = int(np.clip(pk_u[k_i], 0, W - 1)) + W
+                pkv = int(np.clip(pk_v[k_i], 0, H - 1))
+                sku = int(np.clip(sk_u[k_i], 0, W - 1)) + W
+                skv = int(np.clip(sk_v[k_i], 0, H - 1))
 
-            tku, tkv = int(tk_u[0]), int(tk_v[0])
-            pku, pkv = int(pk_u[0]), int(pk_v[0])
-            sku, skv = int(sk_u[0]), int(sk_v[0])
+                label = str(k_i)
+                draw.line([(tku, tkv), (pku, pkv)], fill=color, width=1)
+                draw.ellipse(
+                    [(tku - r_dot, tkv - r_dot), (tku + r_dot, tkv + r_dot)],
+                    fill=color, outline=(0, 0, 0),
+                )
+                draw.text((tku + r_dot + 2, tkv - r_dot), label, fill=color, font=font)
+                draw.ellipse(
+                    [(pku - r_dot, pkv - r_dot), (pku + r_dot, pkv + r_dot)],
+                    fill=color, outline=(0, 0, 0),
+                )
+                draw.text((pku + r_dot + 2, pkv - r_dot), label, fill=color, font=font)
+                draw.ellipse(
+                    [(sku - r_dot, skv - r_dot), (sku + r_dot, skv + r_dot)],
+                    outline=color, width=2,
+                )
+                draw.text((sku + r_dot + 2, skv - r_dot), label, fill=color, font=font)
 
-            # line from trgt kpt → predicted src position (crosses separator)
-            draw.line([(tku, tkv), (pku, pkv)], fill=color, width=1)
+            rows.append(np.array(row_pil))
 
-            # target keypoint: filled circle
-            draw.ellipse(
-                [(tku - r_dot, tkv - r_dot), (tku + r_dot, tkv + r_dot)],
-                fill=color, outline=(0, 0, 0),
-            )
-            # predicted src position: filled circle
-            draw.ellipse(
-                [(pku - r_dot, pkv - r_dot), (pku + r_dot, pkv + r_dot)],
-                fill=color, outline=(0, 0, 0),
-            )
-            # GT src keypoint: open ring (outline only)
-            draw.ellipse(
-                [(sku - r_dot, skv - r_dot), (sku + r_dot, skv + r_dot)],
-                outline=color,
-            )
+        canvas = np.concatenate(rows, axis=0)  # (2H, 2W, 3)
+        arr = canvas.astype(np.float32) / 255.0
+        imgs_out.append(torch.from_numpy(arr).permute(2, 0, 1))
 
-        arr = np.array(img_pil).astype(np.float32) / 255.0  # (H, 2W, 3)
-        imgs_out.append(torch.from_numpy(arr).permute(2, 0, 1))  # (3, H, 2W)
-
-    return torch.stack(imgs_out)  # (B, 3, H, 2W)
+    return torch.stack(imgs_out)  # (B, 3, 2H, 2W)
 
 
 @register_task("Crsp3DNNTask")
@@ -241,6 +266,8 @@ class Crsp3DNNTask(OD3D_Task):
             valid,
             src_mask=src_verts_mask,
             trgt_mask=trgt_verts_mask,
+            src_meshes=batch.src_meshes,
+            trgt_meshes=batch.trgt_meshes,
         )
 
         quant = ObjectPairQuantBatch(

@@ -28,6 +28,7 @@ path_preprocess: ${path_datasets_preprocess}/Omni6DPose_Preprocess
 item_type: object_pair # frame, object, scene, frame_object, scene_object
 
 filter_has_kpts: true
+filter_is_real: false
 
 #batch_type: scene_object
 
