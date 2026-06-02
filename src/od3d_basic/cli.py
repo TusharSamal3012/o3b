@@ -968,7 +968,7 @@ def _run_bench_run(args) -> None:
         ) if run_ds else dict(ds_base)
 
         from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%m%d_%H%M%S")
         if ablation_file is not None:
             run_name = f"{timestamp}__{args.benchmark.stem}__{ablation_file.stem}"
         else:
