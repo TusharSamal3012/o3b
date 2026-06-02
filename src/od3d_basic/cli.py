@@ -967,7 +967,12 @@ def _run_bench_run(args) -> None:
             resolve=True,
         ) if run_ds else dict(ds_base)
 
-        run_name = ablation_file.stem if ablation_file else args.benchmark.stem
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if ablation_file is not None:
+            run_name = f"{timestamp}__{args.benchmark.stem}__{ablation_file.stem}"
+        else:
+            run_name = f"{timestamp}__{args.benchmark.stem}"
         _run_bench_run_with_cfg({**run_raw, "dataset": ds_merged}, run_name)
 
 
@@ -1068,6 +1073,27 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
     subprocess.run(["ssh", ssh_host, remote_submit], check=True)
 
 
+def _job_exists_on_platform(platform: str, job_name: str) -> bool:
+    """Return True if a job named *job_name* is pending or running on the platform."""
+    import subprocess
+
+    try:
+        cfg, _ = _load_platform_config(platform)
+    except Exception:
+        return False
+
+    ssh_host = cfg.get("ssh")
+    if not ssh_host or ssh_host is False:
+        return False
+
+    username = cfg.get("username", "")
+    cmd = f"squeue --name={job_name} --noheader"
+    if username:
+        cmd += f" -u {username}"
+    result = subprocess.run(["ssh", ssh_host, cmd], capture_output=True, text=True)
+    return bool(result.stdout.strip())
+
+
 def _run_bench_rrun(args) -> None:
     """Submit each benchmark/ablation run as a separate sbatch job."""
     import shlex
@@ -1094,7 +1120,12 @@ def _run_bench_rrun(args) -> None:
             job_name = bench_stem
         remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
-        print(f"\nSubmitting '{job_name}': {remote_cmd}")
+        print(f"\nChecking '{job_name}' on {platform}…")
+        if _job_exists_on_platform(platform, job_name):
+            print(f"  → skipping: job '{job_name}' is already pending/running on {platform}")
+            continue
+
+        print(f"Submitting '{job_name}': {remote_cmd}")
         _run_bench_sbatch_cmd(platform, remote_cmd, job_name)
         print(f"  → submitted")
 
