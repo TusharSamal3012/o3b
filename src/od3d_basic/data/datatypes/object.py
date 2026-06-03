@@ -83,6 +83,7 @@ def _add_visibility_gui(server, label: str, handle_dicts: "list[dict]") -> objec
     KEYS = [
         ("mesh",               "Mesh"),
         ("mesh_feats",         "Mesh Feats"),
+        ("mesh_parts",         "Mesh Parts"),
         ("mesh_ncds0c_3dnn",   "Mesh NCDS0C 3DNN"),
         ("mesh_ncds0c_featnn", "Mesh NCDS0C FeatNN"),
         ("pts3d",              "Points"),
@@ -101,6 +102,20 @@ def _add_visibility_gui(server, label: str, handle_dicts: "list[dict]") -> objec
                         h.visible = cb_ref.value
             _make_cb(cb, all_h)
     return gui_folder
+
+
+def _part_id_to_vert_colors(part_id: "Tensor") -> "Tensor":
+    """Map (V,) int64 part IDs → (V, 3) float32 RGB in [0, 1]. ID -1 → gray."""
+    import colorsys
+    n_verts = part_id.shape[0]
+    unique_parts = sorted(int(p) for p in part_id.unique().tolist() if p >= 0)
+    n_parts = len(unique_parts)
+    colors = torch.full((n_verts, 3), 0.55, dtype=torch.float32)
+    for i, pid in enumerate(unique_parts):
+        r, g, b = colorsys.hsv_to_rgb(i / max(n_parts, 1), 0.85, 0.92)
+        mask = part_id == pid
+        colors[mask] = torch.tensor([r, g, b], dtype=torch.float32)
+    return colors
 
 
 def _pca_vert_colors(vert_feats: "Tensor") -> "Tensor":
@@ -132,6 +147,7 @@ class Object:
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (4, 4)
     obj_kpts3d:              Optional[Tensor] = None  # (K, 3)
     obj_kpts3d_mask:         Optional[Tensor] = None  # (K,)  bool
+    obj_verts_part_id:       Optional[Tensor] = None  # (V,)  int64, -1 = unlabeled
     category:                Optional[int]    = None
     category_id:             Optional[int]    = None
     attributes:              Optional[dict]   = None
@@ -244,6 +260,16 @@ class Object:
                 position=position_offset,
             )
 
+        mesh_parts_handle = None
+        if self.mesh is not None and self.obj_verts_part_id is not None:
+            part_colors = _part_id_to_vert_colors(self.obj_verts_part_id)
+            mesh_with_parts = _dc_replace(self.mesh, vert_colors=part_colors)
+            mesh_parts_handle = server.scene.add_mesh_trimesh(
+                f"{node_prefix}/mesh_parts", _mesh_to_trimesh(mesh_with_parts),
+                position=position_offset,
+            )
+            mesh_parts_handle.visible = False
+
         mesh_feats_handle = None
         if self.mesh is not None and (self.mesh.vert_feats is not None or mesh_feats_colors is not None):
             feat_colors = mesh_feats_colors if mesh_feats_colors is not None else _pca_vert_colors(self.mesh.vert_feats)
@@ -297,6 +323,7 @@ class Object:
         return {
             "mesh":               mesh_handle,
             "mesh_feats":         mesh_feats_handle,
+            "mesh_parts":         mesh_parts_handle,
             "mesh_ncds0c_3dnn":   mesh_nocs_handle,
             "mesh_ncds0c_featnn": mesh_nocs_featnn_handle,
             "pts3d":              pts_handle,

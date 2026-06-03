@@ -1,0 +1,36 @@
+# o3x dataset fetch -d densematcher
+# o3x dataset index -d densematcher
+# o3x dataset viz   -d densematcher
+
+# o3x dataset fetch -d densematcher -p slurm
+# o3x dataset index -d densematcher -p slurm
+# o3x dataset viz   -d densematcher -p slurm
+
+class_name: DenseMatcher
+
+path_datasets_raw: /data/lmbraid19/sommerl/datasets
+path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
+
+path_raw: ${path_datasets_raw}/DenseMatcher
+path_preprocess: ${path_datasets_preprocess}/DenseMatcher_Preprocess
+
+item_type: object_pair
+
+# filter_has_kpts: true
+
+object_modalities:
+  - mesh
+  - obj_ncds0c_tform4x4_obj
+  - obj_kpts3d
+  - obj_verts_part_id
+  - category
+
+split: train
+scene_length: 16
+
+modalities:
+categories:
+max_samples: 10000
+
+extra:
+  image_size: [480, 640]

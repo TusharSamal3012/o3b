@@ -1,0 +1,15 @@
+defaults:
+  - dm
+  - _self_
+
+item_type: object
+
+mesh_type: "default"
+
+# o3x dataset fetch -d densematcher_object
+# o3x dataset index -d densematcher_object
+# o3x dataset viz   -d densematcher_object
+
+# o3x dataset fetch -d densematcher_object -p slurm
+# o3x dataset index -d densematcher_object -p slurm
+# o3x dataset viz   -d densematcher_object -p slurm

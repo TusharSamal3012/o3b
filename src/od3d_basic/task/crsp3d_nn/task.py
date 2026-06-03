@@ -35,7 +35,7 @@ def _render_corr_imgs(
     """
     try:
         import numpy as np
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
         from od3d_basic.io import _mesh_to_trimesh
         from od3d_basic.cv.visual.show import (
             render_trimesh_to_tensor,
@@ -48,10 +48,6 @@ def _render_corr_imgs(
     B, K, _ = src_kpts.shape
     imgs_out = []
     r_dot = max(4, H // 52)
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", max(10, H // 24))
-    except Exception:
-        font = ImageFont.load_default()
 
     # two cameras: front-right and back-left (objects in normalized [-1,1] space)
     cam_ts = get_cam_tform4x4_obj_for_viewpoints_count(viewpoints_count=2, dist=5.0).float()
@@ -133,23 +129,19 @@ def _render_corr_imgs(
                 sku = int(np.clip(sk_u[k_i], 0, W - 1)) + W
                 skv = int(np.clip(sk_v[k_i], 0, H - 1))
 
-                label = str(k_i)
                 draw.line([(tku, tkv), (pku, pkv)], fill=color, width=1)
                 draw.ellipse(
                     [(tku - r_dot, tkv - r_dot), (tku + r_dot, tkv + r_dot)],
                     fill=color, outline=(0, 0, 0),
                 )
-                draw.text((tku + r_dot + 2, tkv - r_dot), label, fill=color, font=font)
                 draw.ellipse(
                     [(pku - r_dot, pkv - r_dot), (pku + r_dot, pkv + r_dot)],
                     fill=color, outline=(0, 0, 0),
                 )
-                draw.text((pku + r_dot + 2, pkv - r_dot), label, fill=color, font=font)
                 draw.ellipse(
                     [(sku - r_dot, skv - r_dot), (sku + r_dot, skv + r_dot)],
                     outline=color, width=2,
                 )
-                draw.text((sku + r_dot + 2, skv - r_dot), label, fill=color, font=font)
 
             rows.append(np.array(row_pil))
 

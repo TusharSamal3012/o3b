@@ -130,7 +130,8 @@ def _load_yaml_with_defaults(path: Path, overrides: "list[str] | None" = None) -
 _REGISTRY_DATASETS: dict[str, type["ConfigurableDataset"]] = {}
 
 _CLASS_TO_MODULE: dict[str, str] = {
-    "HouseCorr3D": "od3d_basic.dataset.housecorr3d.dataset",
+    "HouseCorr3D":  "od3d_basic.dataset.housecorr3d.dataset",
+    "DenseMatcher": "od3d_basic.dataset.densematcher.dataset",
 }
 
 
