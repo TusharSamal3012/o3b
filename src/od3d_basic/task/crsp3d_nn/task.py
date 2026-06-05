@@ -177,9 +177,9 @@ def _render_corr_imgs(
     def project(pts_3d: Tensor, cam_t: Tensor):
         pts_h   = torch.cat([pts_3d.float().cpu(), torch.ones(len(pts_3d), 1)], dim=1)
         pts_cam = (cam_t @ pts_h.T).T[:, :3]
-        z = pts_cam[:, 2].clamp(min=1e-6).numpy()
+        z = (-pts_cam[:, 2]).clamp(min=1e-6).numpy()
         u = fx * pts_cam[:, 0].numpy() / z + cx_k
-        v = fy * pts_cam[:, 1].numpy() / z + cy_k
+        v = fy * (-pts_cam[:, 1]).numpy() / z + cy_k
         return u, v
 
     def render_panel(mesh, cam_t: Tensor) -> "np.ndarray":

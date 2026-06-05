@@ -139,6 +139,7 @@ _REGISTRY_DATASETS: dict[str, type["ConfigurableDataset"]] = {}
 _CLASS_TO_MODULE: dict[str, str] = {
     "HouseCorr3D":  "od3d_basic.dataset.housecorr3d.dataset",
     "DenseMatcher": "od3d_basic.dataset.densematcher.dataset",
+    "OpenTT":       "od3d_basic.dataset.opentt.dataset",
 }
 
 
@@ -252,5 +253,6 @@ class ConfigurableDataset(_TorchDataset):
         limit: int = 20,
         object_id: Optional[str] = None,
         render: bool = False,
+        debug: bool = False,
     ) -> None:
         raise NotImplementedError(f"{cls.__name__} does not implement visualize()")

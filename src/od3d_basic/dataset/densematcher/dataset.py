@@ -373,6 +373,7 @@ class DenseMatcher(ConfigurableDataset):
         render: bool = False,
         render_frames: int = 0,
         renderer: str = "pyrender",
+        debug: bool = False,
     ) -> None:
         path_preprocess = cls._path_preprocess(cfg)
         db_path = db or path_preprocess / "index.db"
@@ -412,7 +413,7 @@ class DenseMatcher(ConfigurableDataset):
                 print(f"{row['object_id']}")
 
         from od3d_basic.data.viz import visualize_dataset
-        visualize_dataset(dataset, render=render, render_frames=render_frames, renderer=renderer)
+        visualize_dataset(dataset, render=render, render_frames=render_frames, renderer=renderer, debug=debug)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

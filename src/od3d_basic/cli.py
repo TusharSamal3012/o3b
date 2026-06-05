@@ -7,7 +7,7 @@ Usage:
   o3x dataset viz    -d housecorr3d_object_pair [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
-                                         [--platform PLATFORM]
+                                         [--debug] [--platform PLATFORM]
   o3x bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
   o3x platform setup    -p <platform>
   o3x platform stop  -p <platform> [-y]
@@ -55,6 +55,8 @@ def _build_dataset_parser(sub):
     p_vis.add_argument("--render", action="store_true")
     p_vis.add_argument("--render-frames", type=int, default=4, metavar="N")
     p_vis.add_argument("--renderer", choices=["pyrender", "nvdiffrast"], default="pyrender")
+    p_vis.add_argument("--debug", action="store_true",
+                       help="Show front/top/right camera frustums in the viser scene")
 
     p_tform = ds_sub.add_parser(
         "tform",
@@ -63,6 +65,45 @@ def _build_dataset_parser(sub):
     _add_config(p_tform)
     p_tform.add_argument("--limit", type=int, default=20, metavar="N",
                          help="Max objects to browse (default: 20)")
+
+    p_pre = ds_sub.add_parser(
+        "preprocess",
+        help="Run VLM-based preprocessing (OpenTT: scoreboard detection + score reading)",
+    )
+    _add_config(p_pre)
+    p_pre.add_argument(
+        "--db", type=Path, default=None, metavar="FILE",
+        help="SQLite output file (default: <path_preprocess>/scoreboards.db)",
+    )
+    p_pre.add_argument(
+        "--model", default="Qwen/Qwen3.5-4B", metavar="MODEL",
+        help="Hugging Face VLM model ID (default: Qwen/Qwen3.5-4B)",
+    )
+    p_pre.add_argument(
+        "--frame-stride", type=int, default=30, metavar="N",
+        help="Process every Nth frame — default 30 gives ~4 fps on 120-fps footage",
+    )
+    p_pre.add_argument(
+        "--batch-size", type=int, default=4, metavar="N",
+        help="Frames per model forward pass (default: 4)",
+    )
+    p_pre.add_argument(
+        "--video", default=None, metavar="NAME",
+        help="Restrict to a single video by name, e.g. game_1 or test_3",
+    )
+    p_pre.add_argument(
+        "--device", default="auto", metavar="DEVICE",
+        help="Device for the VLM: 'auto' (default), 'cuda:0', 'cuda:1', 'cpu'. "
+             "Use a specific index to avoid spreading across multiple GPUs.",
+    )
+    p_pre.add_argument(
+        "--override", action="store_true",
+        help="Re-process already-stored frames instead of skipping them.",
+    )
+    p_pre.add_argument(
+        "--debug", action="store_true",
+        help="Print the VLM prompt and show each center-cropped image before inference.",
+    )
 
 
 def _run_dataset(args):
@@ -86,10 +127,30 @@ def _run_dataset(args):
             render=args.render,
             render_frames=args.render_frames,
             renderer=args.renderer,
+            debug=args.debug,
         )
     elif args.dataset_command == "tform":
         from od3d_basic.dataset.tform import run_tform_viewer
         run_tform_viewer(cls, cfg, limit=args.limit)
+    elif args.dataset_command == "preprocess":
+        if not hasattr(cls, "preprocess"):
+            print(
+                f"ERROR: {cls.__name__} does not implement preprocess().\n"
+                "This command is currently only available for OpenTT.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cls.preprocess(
+            cfg,
+            db=args.db,
+            model_id=args.model,
+            frame_stride=args.frame_stride,
+            batch_size=args.batch_size,
+            video=args.video,
+            device=args.device,
+            override=args.override,
+            debug=args.debug,
+        )
 
 
 # ── platform sub-parser ───────────────────────────────────────────────────────

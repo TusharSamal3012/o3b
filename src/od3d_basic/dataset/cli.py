@@ -131,6 +131,8 @@ def main(argv=None) -> None:
                        help="Number of viewpoints to render when --render is set (default: 4)")
     p_vis.add_argument("--renderer", choices=["pyrender", "nvdiffrast"], default="pyrender",
                        help="Renderer backend for --render-frames (default: pyrender)")
+    p_vis.add_argument("--debug", action="store_true",
+                       help="Show front/top/right camera frustums in the viser scene")
 
     args = parser.parse_args(argv)
     overrides = _platform_to_dataset_overrides(args.platform)
@@ -154,6 +156,7 @@ def main(argv=None) -> None:
             render=args.render,
             render_frames=args.render_frames,
             renderer=args.renderer,
+            debug=args.debug,
         )
 
 

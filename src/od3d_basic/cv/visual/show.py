@@ -404,7 +404,9 @@ def render_trimesh_to_tensor(
     )
 
     # FOLLOWING OPENGL convention
-    pyrender_cam_tform4x4_obj = tform4x4(OPEN3D_CAM_TFORM_CAM.clone().to(device=cam_tform4x4_obj.device), cam_tform4x4_obj,)
+    pyrender_cam_tform4x4_obj = cam_tform4x4_obj.clone()
+    
+    #pyrender_cam_tform4x4_obj = tform4x4(OPEN3D_CAM_TFORM_CAM.clone().to(device=cam_tform4x4_obj.device), cam_tform4x4_obj,)
     # pyrender_cam_tform4x4_obj = tform4x4(cam_tform4x4_obj, OBJ_TFORM_OPEN3D_OBJ.clone().to(device=cam_tform4x4_obj.device),)
 
     from od3d_basic.cv.geometry.transform import inv_tform4x4

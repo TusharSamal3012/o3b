@@ -569,52 +569,71 @@ def look_at_rotation(
 
 
 def transf4x4_from_pos_and_theta(pos, theta):
-    in_shape = theta.shape
-    dtype = theta.dtype
+    """
+    Build cam_tform4x4_obj from camera position `pos` (object space) and roll `theta`.
+
+    OpenGL convention: +X right, +Y top, +Z back (-Z forward).
+    Camera looks from `pos` toward the origin. `theta` rolls around the viewing (-Z) axis.
+
+    Args:
+        pos:   (..., 3) camera centre in object/world space
+        theta: (...,)   roll angle in radians
+
+    Returns:
+        (..., 4, 4) camera-from-object homogeneous transform
+    """
+    batch_shape = theta.shape
+    dtype  = theta.dtype
     device = theta.device
-    zeros = torch.zeros(size=in_shape, dtype=dtype, device=device).reshape(-1)
-    ones = torch.ones(size=in_shape, dtype=dtype, device=device).reshape(-1)
-    camrot_pos_rot3x3_obj = look_at_rotation(
-        pos,
-        up=((0, 0, 1),),
-        device=pos.device,
-    ).transpose(
-        -1,
-        -2,
-    )  # pytorch3d convention to store rotation matrix transposed
-    camrot_pos_rot3x3_obj[..., 0:2, :] = -camrot_pos_rot3x3_obj[
-        ...,
-        0:2,
-        :,
-    ]  # pytorch3d convention to have negative x,y axis
+    N = theta.numel()
 
-    camrot_theta_rot3x3_camrot_pos = (
-        torch.stack(
-            [
-                torch.cos(theta),
-                -torch.sin(theta),
-                zeros,
-                torch.sin(theta),
-                torch.cos(theta),
-                zeros,
-                zeros,
-                zeros,
-                ones,
-            ],
-            dim=-1,
-        )
-        .reshape(-1, 3, 3)
-        .transpose(-1, -2)
-    )  # transpose is required because theta is usually given in -z axis instead of +z
+    pos_flat   = pos.reshape(N, 3).to(dtype=dtype)
+    theta_flat = theta.reshape(N)
 
-    camrot_rot3x3_obj = torch.bmm(camrot_theta_rot3x3_camrot_pos, camrot_pos_rot3x3_obj)
-    camrot_transl3_obj = rot3d(pts3d=-pos, rot3x3=camrot_rot3x3_obj)
-    camrot_tform4x4_obj = transf4x4_from_rot3x3_and_transl3(
-        camrot_rot3x3_obj,
-        camrot_transl3_obj,
-    )
+    # camera +Z axis in world = back = away from look target (origin)
+    z_w = torch.nn.functional.normalize(pos_flat, dim=-1, eps=1e-6)   # (N,3)
 
-    return camrot_tform4x4_obj
+    # world "up" hint = +Y; fall back to +Z when pos is parallel to Y
+    up = torch.zeros(N, 3, dtype=dtype, device=device)
+    up[:, 1] = 1.0                                                      # (0,1,0)
+    parallel = (z_w * up).sum(dim=-1).abs() > 0.999                    # (N,)
+    up_fb = torch.zeros(N, 3, dtype=dtype, device=device)
+    up_fb[:, 2] = 1.0                                                   # (0,0,1)
+    up = torch.where(parallel[:, None], up_fb, up)
+
+    # right-handed frame: x_w × y_w = z_w
+    # x_w = normalize(cross(fwd, up))  [GLM lookAtRH convention]
+    fwd = -z_w
+    x_w = torch.nn.functional.normalize(
+        torch.linalg.cross(fwd, up), dim=-1, eps=1e-6)                 # (N,3)
+    # y_w = normalize(cross(z_w, x_w))  so that x_w × y_w = z_w
+    y_w = torch.nn.functional.normalize(
+        torch.linalg.cross(z_w, x_w), dim=-1, eps=1e-6)               # (N,3)
+
+    # base world→camera rotation: rows = camera basis vectors in world
+    R_base = torch.stack([x_w, y_w, z_w], dim=1)                      # (N,3,3)
+
+    # roll matrix: rotation around camera Z by theta
+    c = torch.cos(theta_flat)
+    s = torch.sin(theta_flat)
+    z = torch.zeros_like(c)
+    o = torch.ones_like(c)
+    R_roll = torch.stack([c, -s, z,
+                          s,  c, z,
+                          z,  z, o], dim=-1).reshape(N, 3, 3)         # (N,3,3)
+
+    R = torch.bmm(R_roll, R_base)                                      # (N,3,3)
+    t = torch.bmm(R, (-pos_flat).unsqueeze(-1)).squeeze(-1)            # (N,3)
+
+    # assemble 4x4
+    bot = torch.zeros(N, 1, 4, dtype=dtype, device=device)
+    bot[:, 0, 3] = 1.0
+    tform = torch.cat([
+        torch.cat([R, t.unsqueeze(-1)], dim=-1),                       # (N,3,4)
+        bot,                                                            # (N,1,4)
+    ], dim=1)                                                          # (N,4,4)
+
+    return tform.reshape(batch_shape + (4, 4))
 
 
 def get_spherical_uniform_tform4x4(
@@ -865,9 +884,9 @@ def transf4x4_from_spherical(azim, elev, theta, dist):
     # camera center
     obj_transl3_cam = torch.stack(
         [
-            dist * torch.cos(elev) * torch.sin(azim),
-            -dist * torch.cos(elev) * torch.cos(azim),
+            -dist * torch.cos(elev) * torch.sin(azim),
             dist * torch.sin(elev),
+            -dist * torch.cos(elev) * torch.cos(azim),
         ],
         dim=-1,
     )

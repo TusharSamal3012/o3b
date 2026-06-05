@@ -32,6 +32,88 @@ def _make_kpts_spheres(kpts_np, mask_np, radius: float = 0.02):
     return trimesh.util.concatenate(meshes)
 
 
+def _rot_mat_to_wxyz(R):
+    """Convert 3×3 rotation matrix (numpy) to (w, x, y, z) quaternion."""
+    import numpy as np
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+    return (float(w), float(x), float(y), float(z))
+
+
+def _add_debug_cameras(server, dist: float = 5.0) -> list:
+    """Add front/top/right camera frustums with labels to a viser scene."""
+    import numpy as np
+
+    handles = []
+    batch = get_front_top_right_viewpoints(dist=dist)
+    cam_tform4x4_obj = batch.cam_tform4x4_obj.numpy()  # (3, 4, 4)
+
+    names  = ["front",          "top",            "right"]
+    colors = [(255, 200,   0),  (0,  200, 255),   (255,   0, 200)]
+
+    # Viser renders the frustum opening along the frustum's local +Z.
+    # Our camera +Z is "back" (away from object); flip it with a 180° Y-rotation
+    # so the frustum opening points toward the object (camera forward = -Z_cam).
+    flip_y = np.diag(np.array([-1., 1., -1.]))   # diag(-1,1,-1): 180° around Y
+
+    for i, (name, color) in enumerate(zip(names, colors)):
+        tform = cam_tform4x4_obj[i]              # (4,4) cam←obj
+        obj_tform_cam = np.linalg.inv(tform)
+        pos = obj_tform_cam[:3, 3]
+        # rotate so frustum +Z aligns with camera forward (toward object)
+        R_viser = obj_tform_cam[:3, :3] @ flip_y
+        wxyz = _rot_mat_to_wxyz(R_viser)
+
+        try:
+            h = server.scene.add_camera_frustum(
+                f"/debug_cameras/{name}",
+                fov=0.5,
+                aspect=1.0,
+                scale=0.4,
+                wxyz=wxyz,
+                position=tuple(pos.tolist()),
+                color=color,
+            )
+            handles.append(h)
+        except Exception:
+            pass
+
+        try:
+            h2 = server.scene.add_label(
+                f"/debug_cameras/{name}/label",
+                text=name,
+                position=(0.0, 0.0, 0.0),
+            )
+            handles.append(h2)
+        except Exception:
+            pass
+
+    return handles
+
+
 def _add_canonical_axes(server, axes_length: float = 1.6) -> None:
     """Add a permanent canonical-axis frame and labels to a viser server.
 
@@ -73,6 +155,7 @@ def visualize_dataset(
     render: bool = False,
     render_frames: int = 4,
     renderer: str = "pyrender",
+    debug: bool = False,
 ) -> None:
     """Browse a dataset interactively with Prev / Next navigation.
 
@@ -103,15 +186,11 @@ def visualize_dataset(
             category = getattr(item, "category", None)
             cat_str  = f"  cat={category}" if category is not None else ""
             print(f"  [{i + 1}/{n}] {item_id}{cat_str}")
-            render_fn = getattr(item, "render_modalities", None)
-            if render_fn is not None:
-                modalities = render_fn(renderer=renderer, n_views=render_frames)
-            else:
-                mesh = getattr(item, "mesh", None)
-                if mesh is None:
-                    continue
-                batch_vp = sample_uniform_viewpoints(render_frames, mesh=mesh)
-                modalities = render_mesh_from_viewpoints(batch_vp, renderer=renderer)
+            mesh = getattr(item, "mesh", None)
+            if mesh is None:
+                continue
+            batch_vp = _get_render_viewpoints(render_frames, mesh=mesh)
+            modalities = render_mesh_from_viewpoints(batch_vp, renderer=renderer)
             if modalities is None:
                 continue
             keys = list(modalities.keys())
@@ -147,6 +226,8 @@ def visualize_dataset(
     server = viser.ViserServer()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
     _add_canonical_axes(server)
+    if debug:
+        _add_debug_cameras(server)
     n = len(dataset)
     idx = [0]
     handles: list = []
@@ -201,6 +282,66 @@ def visualize_dataset(
         print("\nStopping.")
 
 
+def get_front_viewpoint(dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
+    """Single front view: camera facing the object head-on (azim=0, elev=0)."""
+    import math
+    import torch
+    from od3d_basic.cv.geometry.transform import transf4x4_from_spherical
+    from od3d_basic.data.datatypes import FrameObjectBatch
+    cam = transf4x4_from_spherical(
+        azim=torch.tensor([0.0]),
+        elev=torch.tensor([0.0]),
+        theta=torch.tensor([0.0]),
+        dist=dist,
+    )
+    return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
+
+
+def get_front_top_viewpoints(dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
+    """Front and top-down views."""
+    import math
+    import torch
+    from od3d_basic.cv.geometry.transform import transf4x4_from_spherical
+    from od3d_basic.data.datatypes import FrameObjectBatch
+    cam = transf4x4_from_spherical(
+        azim=torch.tensor([0.0, 0.0]),
+        elev=torch.tensor([0.0, math.pi / 2.0 - 0.01]),
+        theta=torch.tensor([0.0, 0.0]),
+        dist=dist,
+    )
+    return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
+
+
+def get_front_top_right_viewpoints(dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
+    """Front, top-down, and right-side views."""
+    import math
+    import torch
+    from od3d_basic.cv.geometry.transform import transf4x4_from_spherical
+    from od3d_basic.data.datatypes import FrameObjectBatch
+    cam = transf4x4_from_spherical(
+        azim=torch.tensor([0.0,        0.0,                  math.pi / 2.0]),
+        elev=torch.tensor([0.0,        math.pi / 2.0 - 0.01, 0.0          ]),
+        theta=torch.tensor([0.0,       0.0,                  0.0          ]),
+        dist=dist,
+    )
+    return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
+
+
+def _get_render_viewpoints(n_views: int, dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
+    """Dispatch to the right semantic viewpoint function based on n_views.
+
+    1  → get_front_viewpoint
+    2  → get_front_top_viewpoints
+    ≥3 → get_front_top_right_viewpoints  (default for o3x dataset viz --render)
+    """
+    if n_views == 1:
+        return get_front_viewpoint(dist=dist, mesh=mesh)
+    elif n_views == 2:
+        return get_front_top_viewpoints(dist=dist, mesh=mesh)
+    else:
+        return get_front_top_right_viewpoints(dist=dist, mesh=mesh)
+
+
 def sample_uniform_viewpoints(
     n: int,
     dist: float = 5.0,
@@ -238,12 +379,16 @@ def _render_mesh_pyrender(
     normals_tm = _tm.Trimesh(vertices=mesh_tm.vertices, faces=mesh_tm.faces,
                               vertex_colors=vc_rgba, process=False)
 
+    from od3d_basic.cv.visual.show import OPEN3D_CAM_TFORM_CAM
+
     B = cam_tform4x4_obj.shape[0]
     rgb_frames, depth_frames, normal_frames = [], [], []
     for b in range(B):
         intr, tform = cam_intr4x4[b], cam_tform4x4_obj[b]
-        rgb, depth = render_trimesh_to_tensor(mesh_tm, intr, tform, H=H, W=W)
-        normal_rgb, _ = render_trimesh_to_tensor(normals_tm, intr, tform, H=H, W=W)
+        # following OpenGL
+        tform_od = tform
+        rgb, depth = render_trimesh_to_tensor(mesh_tm, intr, tform_od, H=H, W=W)
+        normal_rgb, _ = render_trimesh_to_tensor(normals_tm, intr, tform_od, H=H, W=W)
         rgb_frames.append(rgb)
         depth_frames.append(depth)
         normal_frames.append(normal_rgb)
@@ -338,7 +483,9 @@ def _render_mesh_nvdiffrast(
 
     # ── Depth ─────────────────────────────────────────────────────────────────
     verts_cam = (cam_tform4x4_obj[:, None] @ verts_h[None, :, :, None])[..., 0]  # (B, V, 4)
-    verts_z = verts_cam[:, :, 2:3]  # positive depth in Open3D convention (B, V, 1)
+    # In our OpenGL convention +Z is back, so Z is negative for verts in front of camera.
+    # Negate to obtain positive depth values.
+    verts_z = -verts_cam[:, :, 2:3]  # (B, V, 1)
     depth_interp, _ = dr.interpolate(verts_z.contiguous(), rast_out, faces)  # (B, H, W, 1)
     depth_masked = depth_interp * mask
     d_max = depth_masked.max()
