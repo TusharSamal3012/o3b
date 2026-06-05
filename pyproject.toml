@@ -21,6 +21,8 @@ dependencies = [
     "viser>=0.2",
     "trimesh>=4.0",
     "wandb",
+    "torch_geometric",
+    "gdist",
 ]
 
 [project.scripts]

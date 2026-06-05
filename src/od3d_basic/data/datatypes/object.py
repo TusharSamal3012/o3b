@@ -104,17 +104,29 @@ def _add_visibility_gui(server, label: str, handle_dicts: "list[dict]") -> objec
     return gui_folder
 
 
-def _part_id_to_vert_colors(part_id: "Tensor") -> "Tensor":
-    """Map (V,) int64 part IDs → (V, 3) float32 RGB in [0, 1]. ID -1 → gray."""
+def _part_id_to_vert_colors(
+    part_id: "Tensor",
+    reference_part_id: "Optional[Tensor]" = None,
+) -> "Tensor":
+    """Map (V,) int64 part IDs → (V, 3) float32 RGB in [0, 1]. ID -1 → gray.
+
+    reference_part_id: if given, the hue mapping is built from its unique parts
+    instead of from part_id.  Pass the source part_id when coloring both source
+    and target so that the same part always gets the same color.
+    """
     import colorsys
-    n_verts = part_id.shape[0]
-    unique_parts = sorted(int(p) for p in part_id.unique().tolist() if p >= 0)
+    ref = reference_part_id if reference_part_id is not None else part_id
+    unique_parts = sorted(int(p) for p in ref.unique().tolist() if p >= 0)
     n_parts = len(unique_parts)
-    colors = torch.full((n_verts, 3), 0.55, dtype=torch.float32)
+    part_to_color: dict = {}
     for i, pid in enumerate(unique_parts):
         r, g, b = colorsys.hsv_to_rgb(i / max(n_parts, 1), 0.85, 0.92)
+        part_to_color[pid] = (r, g, b)
+    colors = torch.full((part_id.shape[0], 3), 0.55, dtype=torch.float32)
+    for pid, (r, g, b) in part_to_color.items():
         mask = part_id == pid
-        colors[mask] = torch.tensor([r, g, b], dtype=torch.float32)
+        if mask.any():
+            colors[mask] = torch.tensor([r, g, b], dtype=torch.float32)
     return colors
 
 
@@ -462,6 +474,7 @@ class ObjectPairBatch:
     src_verts3d:                  Optional[Tensor] = None  # (B, V, 3)
     src_verts3d_feats:            Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
     src_verts3d_feats_mask:       Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
+    src_verts3d_part_id:          Optional[Tensor] = None  # (B, V)               int64, -1=unlabeled
     src_mesh:                     Optional[Mesh]   = None  # shared mesh for all B src samples
     src_obj_ncds0c_tform4x4_obj:  Optional[Tensor] = None  # (B, 4, 4)
     src_obj_kpts3d:               Optional[Tensor] = None  # (B, K, 3)
@@ -473,6 +486,7 @@ class ObjectPairBatch:
     trgt_verts3d:                 Optional[Tensor] = None  # (B, V, 3)
     trgt_verts3d_feats:           Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
     trgt_verts3d_feats_mask:      Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
+    trgt_verts3d_part_id:         Optional[Tensor] = None  # (B, V)               int64, -1=unlabeled
     trgt_mesh:                    Optional[Mesh]   = None  # shared mesh for all B trgt samples
     src_meshes:                   Optional[list]   = None  # list of B Mesh objects (per-sample)
     trgt_meshes:                  Optional[list]   = None  # list of B Mesh objects (per-sample)
@@ -517,18 +531,39 @@ def collate_object_pairs(
             torch.tensor(v) if v is not None else None for v in vals
         ])
 
-    src_verts3d,       _src_verts_pad_mask  = _get_pad("verts3d",            "src")
+    src_verts3d,       src_feats_pad_mask   = _get_pad("verts3d",            "src")
     src_verts3d_feats, _src_feats_pad_mask  = _get_pad("verts3d_feats",       "src")
-    _src_feats_mask_raw, _                  = _get_pad("verts3d_feats_mask",  "src")
+    src_feats_mask_raw, _                   = _get_pad("verts3d_feats_mask",  "src")
 
-    trgt_verts3d,       _trgt_verts_pad_mask = _get_pad("verts3d",            "trgt")
+    trgt_verts3d,       trgt_feats_pad_mask  = _get_pad("verts3d",            "trgt")
     trgt_verts3d_feats, _trgt_feats_pad_mask = _get_pad("verts3d_feats",       "trgt")
-    _trgt_feats_mask_raw, _                  = _get_pad("verts3d_feats_mask",  "trgt")
+    trgt_feats_mask_raw, _                   = _get_pad("verts3d_feats_mask",  "trgt")
 
     _src_meshes  = [s.src_object.mesh  for s in samples]
     _trgt_meshes = [s.trgt_object.mesh for s in samples]
     src_meshes_list  = _src_meshes  if any(m is not None for m in _src_meshes)  else None
     trgt_meshes_list = _trgt_meshes if any(m is not None for m in _trgt_meshes) else None
+
+    def _pad_part_ids(raw_list, include_key):
+        if not any(p is not None for p in raw_list):
+            return None
+        if include is not None and include_key not in include:
+            return None
+        filled = [p if p is not None else torch.full((1,), -1, dtype=torch.int64) for p in raw_list]
+        sizes = [p.shape[0] for p in filled]
+        V_max = max(sizes)
+        B_loc = len(filled)
+        out = torch.full((B_loc, V_max), -1, dtype=torch.int64)
+        for i, (p, s) in enumerate(zip(filled, sizes)):
+            out[i, :s] = p
+        return out
+
+    trgt_verts3d_part_id = _pad_part_ids(
+        [s.trgt_object.obj_verts_part_id for s in samples], "trgt_obj_verts_part_id"
+    )
+    src_verts3d_part_id = _pad_part_ids(
+        [s.src_object.obj_verts_part_id for s in samples], "src_obj_verts_part_id"
+    )
 
     return ObjectPairBatch(
         src_pts3d                   = _get("pts3d",                   "src"),
@@ -536,7 +571,8 @@ def collate_object_pairs(
         src_pts3d_feats_mask        = _get("pts3d_feats_mask",        "src"),
         src_verts3d                 = src_verts3d,
         src_verts3d_feats           = src_verts3d_feats,
-        src_verts3d_feats_mask      = _merge_masks(_src_feats_pad_mask, _src_feats_mask_raw),
+        src_verts3d_feats_mask      = _merge_masks(_src_feats_pad_mask, src_feats_mask_raw),
+        src_verts3d_part_id         = src_verts3d_part_id,
         src_meshes                  = src_meshes_list,
         src_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","src"),
         src_obj_kpts3d              = _get("obj_kpts3d",              "src"),
@@ -547,7 +583,8 @@ def collate_object_pairs(
         trgt_pts3d_feats_mask        = _get("pts3d_feats_mask",        "trgt"),
         trgt_verts3d                 = trgt_verts3d,
         trgt_verts3d_feats           = trgt_verts3d_feats,
-        trgt_verts3d_feats_mask      = _merge_masks(_trgt_feats_pad_mask, _trgt_feats_mask_raw),
+        trgt_verts3d_feats_mask      = _merge_masks(_trgt_feats_pad_mask, trgt_feats_mask_raw),
+        trgt_verts3d_part_id         = trgt_verts3d_part_id,
         trgt_meshes                  = trgt_meshes_list,
         trgt_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","trgt"),
         trgt_obj_kpts3d              = _get("obj_kpts3d",              "trgt"),
@@ -581,9 +618,9 @@ def collate_objects(
             return pad_mask
         return pad_mask & raw_mask
 
-    verts3d,       _verts_pad_mask  = _get_pad("verts3d")
+    verts3d,       feats_pad_mask   = _get_pad("verts3d")
     verts3d_feats, _feats_pad_mask  = _get_pad("verts3d_feats")
-    _feats_mask_raw, _              = _get_pad("verts3d_feats_mask")
+    feats_mask_raw, _               = _get_pad("verts3d_feats_mask")
 
     return ObjectBatch(
         pts3d                   = _get("pts3d"),
@@ -591,7 +628,7 @@ def collate_objects(
         pts3d_feats_mask        = _get("pts3d_feats_mask"),
         verts3d                 = verts3d,
         verts3d_feats           = verts3d_feats,
-        verts3d_feats_mask      = _merge_masks(_feats_pad_mask, _feats_mask_raw),
+        verts3d_feats_mask      = _merge_masks(_feats_pad_mask, feats_mask_raw),
         obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj"),
         obj_kpts3d              = _get("obj_kpts3d"),
         obj_kpts3d_mask         = _get("obj_kpts3d_mask"),

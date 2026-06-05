@@ -54,10 +54,11 @@ class DatasetConfig:
     object_modalities: Optional[set[str]]  = None
 
     # filtering
-    categories:      Optional[list[str]]   = None   # None = all
-    max_samples:     Optional[int]         = None
-    filter_has_kpts: bool                  = False
-    filter_is_real:  bool                  = False
+    categories:        Optional[list[str]]   = None   # None = all
+    subsets:           Optional[list[str]]   = None   # None = all; e.g. ["train"] or ["train","val"]
+    filter_count_max:  Optional[int]         = None   # None = all; max number of samples to load
+    filter_has_kpts:   bool                  = False
+    filter_is_real:    bool                  = False
 
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
@@ -77,10 +78,11 @@ class DatasetConfig:
             "mesh_type":       self.mesh_type,
             "modalities":        sorted(self.modalities)        if self.modalities        else None,
             "object_modalities": sorted(self.object_modalities) if self.object_modalities else None,
-            "categories":      self.categories,
-            "max_samples":     self.max_samples,
-            "filter_has_kpts": self.filter_has_kpts,
-            "filter_is_real":  self.filter_is_real,
+            "categories":        self.categories,
+            "subsets":           self.subsets,
+            "filter_count_max":  self.filter_count_max,
+            "filter_has_kpts":   self.filter_has_kpts,
+            "filter_is_real":    self.filter_is_real,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -99,10 +101,11 @@ class DatasetConfig:
             mesh_type       = d.get("mesh_type", "default"),
             modalities        = set(d["modalities"])        if d.get("modalities")        else None,
             object_modalities = set(d["object_modalities"]) if d.get("object_modalities") else None,
-            categories      = d.get("categories"),
-            max_samples     = d.get("max_samples"),
-            filter_has_kpts = bool(d.get("filter_has_kpts", False)),
-            filter_is_real  = bool(d.get("filter_is_real",  False)),
+            categories       = d.get("categories"),
+            subsets          = d.get("subsets"),
+            filter_count_max = d.get("filter_count_max") or d.get("max_samples"),
+            filter_has_kpts  = bool(d.get("filter_has_kpts", False)),
+            filter_is_real   = bool(d.get("filter_is_real",  False)),
             extra           = d.get("extra", {}),
         )
 

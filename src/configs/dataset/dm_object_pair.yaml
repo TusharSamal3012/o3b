@@ -7,7 +7,13 @@ item_type: object_pair
 #mesh_type: "mc16_vuni4_r256_fdinov2s"
 #mesh_type: "mc16_vuni100_r256_fdiff3f"
 
-categories:
+
+# categories:
+#  - animals
+  
+# subsets: 
+#  - test
+
 
 # o3x dataset fetch -d densematcher_object_pair
 # o3x dataset index -d densematcher_object_pair

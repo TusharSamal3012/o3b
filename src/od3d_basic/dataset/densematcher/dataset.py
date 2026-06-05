@@ -51,43 +51,49 @@ class DenseMatcher(ConfigurableDataset):
             cur = con.cursor()
             self._object_rows = [dict(r) for r in cur.execute("SELECT * FROM objects").fetchall()]
             _id_to_idx: dict[str, int] = {r["object_id"]: i for i, r in enumerate(self._object_rows)}
-            cats = self.cfg.categories
+            cats    = self.cfg.categories
+            subsets = self.cfg.subsets
+
+            def _build_clauses(prefix: str = "") -> tuple[str, list]:
+                """Return (WHERE clauses string, params list) for optional filters."""
+                clauses, params = "", []
+                kpts_col    = f"{prefix}obj_kpts3d"
+                cat_col     = f"{prefix}category"
+                subset_col  = f"{prefix}subset"
+                if self.cfg.filter_has_kpts:
+                    clauses += f" AND {kpts_col} IS NOT NULL"
+                if cats:
+                    ph = ", ".join("?" * len(cats))
+                    clauses += f" AND {cat_col} IN ({ph})"
+                    params   += list(cats)
+                if subsets:
+                    ph = ", ".join("?" * len(subsets))
+                    clauses += f" AND {subset_col} IN ({ph})"
+                    params   += list(subsets)
+                return clauses, params
 
             if self.cfg.item_type == ItemType.OBJECT:
-                kpts_clause  = " AND obj_kpts3d IS NOT NULL" if self.cfg.filter_has_kpts else ""
-                limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
-                if cats:
-                    placeholders = ", ".join("?" * len(cats))
-                    cat_clause   = f" AND category IN ({placeholders})"
-                    params: list = list(cats)
-                else:
-                    cat_clause, params = "", []
+                clauses, params = _build_clauses()
+                limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                 rows = cur.execute(
-                    f"SELECT object_id FROM objects WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}",
+                    f"SELECT object_id FROM objects WHERE 1=1{clauses}{limit_clause}",
                     params,
                 ).fetchall()
                 self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
 
             elif self.cfg.item_type == ItemType.OBJECT_PAIR:
-                kpts_clause = (
-                    " AND src_o.obj_kpts3d IS NOT NULL AND trgt_o.obj_kpts3d IS NOT NULL"
-                    if self.cfg.filter_has_kpts else ""
-                )
-                limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
-                if cats:
-                    placeholders = ", ".join("?" * len(cats))
-                    cat_clause   = (f" AND src_o.category IN ({placeholders})"
-                                    f" AND trgt_o.category IN ({placeholders})")
-                    params = list(cats) + list(cats)
-                else:
-                    cat_clause, params = "", []
+                src_clauses, src_params   = _build_clauses(prefix="src_o.")
+                trgt_clauses, trgt_params = _build_clauses(prefix="trgt_o.")
+                all_clauses = src_clauses + trgt_clauses
+                all_params  = src_params  + trgt_params
+                limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                 rows = cur.execute(f"""
                     SELECT op.src_object_id, op.trgt_object_id
                     FROM object_pairs op
                     JOIN objects src_o  ON op.src_object_id  = src_o.object_id
                     JOIN objects trgt_o ON op.trgt_object_id = trgt_o.object_id
-                    WHERE 1=1{kpts_clause}{cat_clause}{limit_clause}
-                """, params).fetchall()
+                    WHERE 1=1{all_clauses}{limit_clause}
+                """, all_params).fetchall()
                 self._object_rows_id = [
                     (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])
                     for r in rows
@@ -129,7 +135,21 @@ class DenseMatcher(ConfigurableDataset):
         if need_part_id and mesh is not None:
             mesh_rel = row.get("mesh_path")
             obj_dir  = (self.path_raw / mesh_rel).parent if mesh_rel else self.path_object_meshes / oid
-            obj_verts_part_id = _load_groups_txt(obj_dir, n_verts=len(mesh.verts))
+            if self.cfg.mesh_type == "default":
+                # simple_mesh.obj is the loaded mesh — groups.txt indices apply directly
+                obj_verts_part_id = _load_groups_txt(obj_dir, n_verts=len(mesh.verts))
+            else:
+                # Preprocessed mesh has different vertices; remap via nearest simple_mesh vertex
+                simple_file = obj_dir / "simple_mesh.obj"
+                if simple_file.exists():
+                    from od3d_basic.io import _load_mesh as _lm
+                    simple_mesh, _ = _lm(simple_file)
+                    if simple_mesh is not None:
+                        simple_part_id = _load_groups_txt(obj_dir, n_verts=len(simple_mesh.verts))
+                        if simple_part_id is not None:
+                            nn = torch.cdist(mesh.verts.float().cpu(),
+                                             simple_mesh.verts.float().cpu()).argmin(dim=1)
+                            obj_verts_part_id = simple_part_id[nn]
 
         kpts3d, kpts3d_mask = None, None
         if need_kpts:
@@ -216,7 +236,24 @@ class DenseMatcher(ConfigurableDataset):
         print(f"path_preprocess : {path_preprocess}")
         print(f"db              : {db_path}")
 
-        # Layout: path_raw/<category>/<object_id>/color_mesh.obj
+        # Read subset membership from train/val/test txt files.
+        # Each line has the format  <category>/<obj_dir_name>
+        # which maps to object_id = <category>__<obj_dir_name>.
+        print(f"\nReading subsets : {path_raw}")
+        subset_by_id: dict[str, str] = {}
+        for subset_name in ("train", "val", "test"):
+            txt = path_raw / f"{subset_name}_files.txt"
+            if not txt.exists():
+                continue
+            for line in txt.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                object_id = line.replace("/", "__")
+                subset_by_id[object_id] = subset_name
+        print(f"  {len(subset_by_id)} object(s) assigned to a subset")
+
+        # Layout: path_raw/<category>/<object_id>/simple_mesh.obj
         print(f"\nScanning meshes : {path_raw}")
         mesh_entries: list[dict] = []
         for cat_dir in sorted(path_raw.iterdir()):
@@ -227,10 +264,12 @@ class DenseMatcher(ConfigurableDataset):
                 if not obj_dir.is_dir():
                     continue
                 mesh_file = _dm_mesh_in_dir(obj_dir)
+                oid = f"{category}__{obj_dir.name}"
                 mesh_entries.append({
-                    "object_id": f"{category}__{obj_dir.name}",
+                    "object_id": oid,
                     "mesh_path": str(mesh_file.relative_to(path_raw)) if mesh_file else None,
                     "category":  category,
+                    "subset":    subset_by_id.get(oid),
                 })
         print(f"  found {len(mesh_entries)} object(s)")
 
@@ -267,16 +306,17 @@ class DenseMatcher(ConfigurableDataset):
                 mesh_path       TEXT,
                 obj_kpts3d      TEXT,
                 obj_kpts3d_mask TEXT,
-                category        TEXT
+                category        TEXT,
+                subset          TEXT
             )
         """)
         for i, entry in enumerate(mesh_entries):
             oid = entry["object_id"]
             kpts_json, mask_json = kpts_by_id.get(oid, (None, None))
             cur.execute(
-                "INSERT INTO objects (object_id, mesh_path, obj_kpts3d, obj_kpts3d_mask, category) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (oid, entry["mesh_path"], kpts_json, mask_json, entry.get("category")),
+                "INSERT INTO objects (object_id, mesh_path, obj_kpts3d, obj_kpts3d_mask, category, subset) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (oid, entry["mesh_path"], kpts_json, mask_json, entry.get("category"), entry.get("subset")),
             )
             if (i + 1) % 100 == 0 or (i + 1) == len(mesh_entries):
                 sys.stdout.write(f"\r  inserted {i + 1}/{len(mesh_entries)}")

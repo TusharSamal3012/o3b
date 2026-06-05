@@ -66,7 +66,7 @@ class HouseCorr3D(ConfigurableDataset):
                     if self.cfg.filter_is_real else
                     " AND object_id NOT LIKE '%real%'"
                 )
-                limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
+                limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                 if cats:
                     placeholders = ", ".join("?" * len(cats))
                     cat_clause   = f" AND category IN ({placeholders})"
@@ -89,7 +89,7 @@ class HouseCorr3D(ConfigurableDataset):
                     if self.cfg.filter_is_real else
                     " AND src_o.object_id NOT LIKE '%real%' AND trgt_o.object_id NOT LIKE '%real%'"
                 )
-                limit_clause = f" LIMIT {self.cfg.max_samples}" if self.cfg.max_samples else ""
+                limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                 if cats:
                     placeholders = ", ".join("?" * len(cats))
                     cat_clause   = (f" AND src_o.category IN ({placeholders})"

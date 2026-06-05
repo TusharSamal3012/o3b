@@ -17,8 +17,13 @@ class ObjectPairQualitBatch:
     # predicted keypoints on the target in the src canonical frame
     trgt_obj_kpts3d_in_src:   Optional[Tensor] = None  # (B, K, 3)
 
-    # rendered visualizations (optional, for logging)
+    # keypoint correspondence images
     imgs:                     Optional[Tensor] = None  # (B, 3, H, W)  float32 [0,1]
+
+    # part correspondence images:
+    #   left  = source mesh colored by part label
+    #   right = target mesh colored by nearest-source-vertex part label (feature NN)
+    part_imgs:                Optional[Tensor] = None  # (B, 3, H, W)  float32 [0,1]
 
     # extra per-task qualitative outputs
     extra: dict = field(default_factory=dict)
@@ -29,19 +34,21 @@ class ObjectPairQualitBatch:
         wb=None,
         log_imgs: bool = True,
     ) -> dict:
-        """Return a dict ready for wandb.log().
-
-        Images in *imgs* are included when *log_imgs* is True and *wb* is
-        provided.  Extra tensor fields are skipped (not meaningful in W&B).
-        """
         out: dict = {}
-        if wb is None or not log_imgs or self.imgs is None:
+        if wb is None or not log_imgs:
             return out
-        out[f"{prefix}/correspondences"] = [
-            wb.Image(
-                img.permute(1, 2, 0).detach().cpu().float().numpy(),
-                caption=f"i{i}",
-            )
-            for i, img in enumerate(self.imgs)
-        ]
+
+        def _log_tensor_imgs(tensor, key):
+            if tensor is None:
+                return
+            out[key] = [
+                wb.Image(
+                    img.permute(1, 2, 0).detach().cpu().float().numpy(),
+                    caption=f"i{i}",
+                )
+                for i, img in enumerate(tensor)
+            ]
+
+        _log_tensor_imgs(self.imgs,      f"{prefix}/correspondences")
+        _log_tensor_imgs(self.part_imgs, f"{prefix}/part_correspondences")
         return out

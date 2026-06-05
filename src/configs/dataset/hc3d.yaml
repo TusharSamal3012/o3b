@@ -43,7 +43,7 @@ scene_length: 16
 
 modalities:
 categories:
-max_samples: 10000
+filter_count_max: 10000
 
 extra:
   image_size: [480, 640]
