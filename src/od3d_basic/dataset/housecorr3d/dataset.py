@@ -155,7 +155,7 @@ class HouseCorr3D(ConfigurableDataset):
                     pass
             category = row.get("category")
 
-        return Object(
+        obj = Object(
             object_id               = oid,
             mesh                    = mesh if need_mesh else None,
             verts3d                 = mesh.verts if (need_verts3d and mesh is not None) else None,
@@ -166,6 +166,10 @@ class HouseCorr3D(ConfigurableDataset):
             category                = category,
             category_id             = category_id,
         )
+        if self.cfg.obj_tform4x4 is not None:
+            import torch as _torch
+            obj = obj.transform(_torch.tensor(self.cfg.obj_tform4x4, dtype=_torch.float32))
+        return obj
 
     def _load_object_pair(self, idx: int) -> ObjectPair:
         src_idx, trgt_idx = self._object_rows_id[idx]

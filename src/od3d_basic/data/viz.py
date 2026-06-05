@@ -32,6 +32,42 @@ def _make_kpts_spheres(kpts_np, mask_np, radius: float = 0.02):
     return trimesh.util.concatenate(meshes)
 
 
+def _add_canonical_axes(server, axes_length: float = 1.6) -> None:
+    """Add a permanent canonical-axis frame and labels to a viser server.
+
+    Uses viser's built-in add_frame (one scene node, no trimesh computation):
+        X (red)   = Right
+        Y (green) = Top
+        Z (blue)  = Back
+
+    axes_length=1.6 (0.8 × max extent 2 for objects normalised to [-1,1]³).
+    """
+    al = axes_length
+    try:
+        server.scene.add_frame(
+            "/canonical_axes",
+            wxyz=(1.0, 0.0, 0.0, 0.0),
+            position=(0.0, 0.0, 0.0),
+            axes_length=al,
+            axes_radius=al * 0.025,
+            origin_radius=al * 0.04,
+        )
+    except Exception:
+        return
+
+    for tip, name in (
+        ((al,  0.0, 0.0), "right"),
+        ((0.0, al,  0.0), "top"),
+        ((0.0, 0.0, al),  "back"),
+    ):
+        try:
+            server.scene.add_label(
+                f"/canonical_axes/label_{name}", text=name, position=tip
+            )
+        except Exception:
+            pass
+
+
 def visualize_dataset(
     dataset,
     render: bool = False,
@@ -110,6 +146,7 @@ def visualize_dataset(
 
     server = viser.ViserServer()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
+    _add_canonical_axes(server)
     n = len(dataset)
     idx = [0]
     handles: list = []

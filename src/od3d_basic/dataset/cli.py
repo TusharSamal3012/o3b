@@ -103,6 +103,16 @@ def main(argv=None) -> None:
         help="SQLite output file (default: <path_preprocess>/index.db)",
     )
 
+    p_tform = sub.add_parser(
+        "tform",
+        help="Interactive axis-convention viewer — determine obj_tform4x4 for the dataset",
+    )
+    _add_config(p_tform)
+    p_tform.add_argument(
+        "--limit", type=int, default=20, metavar="N",
+        help="Max objects to browse (default: 20)",
+    )
+
     p_vis = sub.add_parser("viz", help="Show dataset summary and optionally render meshes")
     _add_config(p_vis)
     p_vis.add_argument(
@@ -126,7 +136,10 @@ def main(argv=None) -> None:
     overrides = _platform_to_dataset_overrides(args.platform)
     cls, cfg = _load_class_from_config(args.config, overrides=overrides)
 
-    if args.command == "fetch":
+    if args.command == "tform":
+        from od3d_basic.dataset.tform import run_tform_viewer
+        run_tform_viewer(cls, cfg, limit=args.limit)
+    elif args.command == "fetch":
         cls.fetch(cfg, url=args.url)
     elif args.command == "index":
         cls.index(cfg, db=args.db)

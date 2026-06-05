@@ -59,6 +59,8 @@ class DatasetConfig:
     filter_count_max:  Optional[int]         = None   # None = all; max number of samples to load
     filter_has_kpts:   bool                  = False
     filter_is_real:    bool                  = False
+    # dataset-wide rigid transform applied to every loaded object (4x4, R|t convention)
+    obj_tform4x4:      Optional[list]        = None   # [[r00,r01,r02,tx],[...],[...],[0,0,0,1]]
 
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
@@ -83,6 +85,7 @@ class DatasetConfig:
             "filter_count_max":  self.filter_count_max,
             "filter_has_kpts":   self.filter_has_kpts,
             "filter_is_real":    self.filter_is_real,
+            "obj_tform4x4":      self.obj_tform4x4,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -106,6 +109,7 @@ class DatasetConfig:
             filter_count_max = d.get("filter_count_max") or d.get("max_samples"),
             filter_has_kpts  = bool(d.get("filter_has_kpts", False)),
             filter_is_real   = bool(d.get("filter_is_real",  False)),
+            obj_tform4x4     = d.get("obj_tform4x4"),
             extra           = d.get("extra", {}),
         )
 

@@ -56,6 +56,14 @@ def _build_dataset_parser(sub):
     p_vis.add_argument("--render-frames", type=int, default=4, metavar="N")
     p_vis.add_argument("--renderer", choices=["pyrender", "nvdiffrast"], default="pyrender")
 
+    p_tform = ds_sub.add_parser(
+        "tform",
+        help="Interactive axis-convention viewer — determine obj_tform4x4 for the dataset",
+    )
+    _add_config(p_tform)
+    p_tform.add_argument("--limit", type=int, default=20, metavar="N",
+                         help="Max objects to browse (default: 20)")
+
 
 def _run_dataset(args):
     from od3d_basic.dataset.cli import _load_class_from_config, _platform_to_dataset_overrides
@@ -79,6 +87,9 @@ def _run_dataset(args):
             render_frames=args.render_frames,
             renderer=args.renderer,
         )
+    elif args.dataset_command == "tform":
+        from od3d_basic.dataset.tform import run_tform_viewer
+        run_tform_viewer(cls, cfg, limit=args.limit)
 
 
 # ── platform sub-parser ───────────────────────────────────────────────────────

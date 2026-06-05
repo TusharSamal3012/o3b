@@ -164,6 +164,46 @@ class Object:
     category_id:             Optional[int]    = None
     attributes:              Optional[dict]   = None
 
+    def transform(self, tform4x4: "Tensor") -> "Object":
+        """Return a new Object with all geometric attributes transformed by tform4x4.
+
+        tform4x4 is a (4, 4) float tensor where:
+          tform4x4[:3, :3]  is the rotation matrix R
+          tform4x4[:3,  3]  is the translation vector t
+
+        Points are mapped as  p_new = R @ p + t.
+        obj_ncds0c_tform4x4_obj is updated to preserve NOCS coordinates:
+          tform_new = tform_old @ inv(tform4x4)
+        """
+        from dataclasses import replace as _dc_replace
+
+        T = tform4x4.float().cpu()
+        R = T[:3, :3]   # (3, 3)
+        t = T[:3,  3]   # (3,)
+
+        def _xfm(pts: "Optional[Tensor]") -> "Optional[Tensor]":
+            if pts is None:
+                return None
+            return (R @ pts.float().cpu().T).T + t
+
+        new_mesh = None
+        if self.mesh is not None:
+            from dataclasses import replace as _r
+            new_mesh = _r(self.mesh, verts=_xfm(self.mesh.verts))
+
+        new_tform = None
+        if self.obj_ncds0c_tform4x4_obj is not None:
+            new_tform = self.obj_ncds0c_tform4x4_obj.float().cpu() @ torch.linalg.inv(T)
+
+        return _dc_replace(
+            self,
+            pts3d                   = _xfm(self.pts3d),
+            verts3d                 = _xfm(self.verts3d),
+            obj_kpts3d              = _xfm(self.obj_kpts3d),
+            mesh                    = new_mesh,
+            obj_ncds0c_tform4x4_obj = new_tform,
+        )
+
     def render_modalities(
         self,
         renderer: str = "pyrender",
