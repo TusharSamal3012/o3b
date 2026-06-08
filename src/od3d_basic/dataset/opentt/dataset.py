@@ -240,7 +240,7 @@ class OpenTT(ConfigurableDataset):
 
         if not dataset._clips:
             print(
-                "No clips found. Run 'o3x dataset fetch -d opentt' first.",
+                "No clips found. Run 'o3b dataset fetch -d opentt' first.",
                 file=sys.stderr,
             )
             return
@@ -293,7 +293,7 @@ class OpenTT(ConfigurableDataset):
                 urllib.request.urlretrieve(src, dest, _progress)
                 print()
 
-        print("\nDone. Run 'o3x dataset index -d opentt' next.")
+        print("\nDone. Run 'o3b dataset index -d opentt' next.")
 
     @classmethod
     def index(cls, cfg: DatasetConfig, *, db: Optional[Path] = None) -> None:
@@ -370,7 +370,7 @@ class OpenTT(ConfigurableDataset):
 
         if not dataset._clips:
             print(
-                "No clips found. Run 'o3x dataset fetch -d opentt' first, then make sure\n"
+                "No clips found. Run 'o3b dataset fetch -d opentt' first, then make sure\n"
                 f"  path_raw → {dataset._path_raw}\n"
                 "contains annotations/ and videos/ sub-directories.",
                 file=sys.stderr,

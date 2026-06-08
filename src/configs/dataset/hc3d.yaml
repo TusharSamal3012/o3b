@@ -1,12 +1,12 @@
 
-# o3x dataset fetch -d hc3d  
-# o3x dataset index -d hc3d  
-# o3x dataset viz -d hc3d 
+# o3b dataset fetch -d hc3d  
+# o3b dataset index -d hc3d  
+# o3b dataset viz -d hc3d 
 
 
-# o3x dataset fetch -d hc3d -p slurm  
-# o3x dataset index -d hc3d -p slurm
-# o3x dataset viz -d hc3d -p slurm
+# o3b dataset fetch -d hc3d -p slurm  
+# o3b dataset index -d hc3d -p slurm
+# o3b dataset viz -d hc3d -p slurm
 
 class_name: HouseCorr3D
 

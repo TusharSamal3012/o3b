@@ -6,11 +6,11 @@ item_type: object # frame, object, scene, frame_object, scene_object
 
 mesh_type: "mc16_vuni4_r256_fdinov2s"
 
-# o3x dataset fetch -d hc3d_object  
-# o3x dataset index -d hc3d_object
-# o3x dataset viz -d hc3d_object
+# o3b dataset fetch -d hc3d_object  
+# o3b dataset index -d hc3d_object
+# o3b dataset viz -d hc3d_object
 
 
-# o3x dataset fetch -d hc3d_object -p slurm  
-# o3x dataset index -d hc3d_object -p slurm
-# o3x dataset viz -d hc3d_object -p slurm
+# o3b dataset fetch -d hc3d_object -p slurm  
+# o3b dataset index -d hc3d_object -p slurm
+# o3b dataset viz -d hc3d_object -p slurm

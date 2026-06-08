@@ -1,24 +1,24 @@
 # Extended OpenTTGames — table tennis event dataset
 #
-# o3x dataset fetch -d opentt
-# o3x dataset index -d opentt
-# o3x dataset viz   -d opentt
+# o3b dataset fetch -d opentt
+# o3b dataset index -d opentt
+# o3b dataset viz   -d opentt
 #
 # On a remote platform:
-# o3x dataset fetch -d opentt -p slurm
-# o3x dataset index -d opentt -p slurm
-# o3x dataset viz   -d opentt -p slurm
+# o3b dataset fetch -d opentt -p slurm
+# o3b dataset index -d opentt -p slurm
+# o3b dataset viz   -d opentt -p slurm
 
-# o3x dataset preprocess -d opentt
-# o3x dataset preprocess -d opentt --model Qwen/Qwen2-VL-2B-Instruct --device cuda:0
-# o3x dataset preprocess -d opentt --model Qwen/Qwen3.5-4B --device cuda:0
-# o3x dataset preprocess -d opentt --model Qwen/Qwen3.5-2B --device cuda:0
-# o3x dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
-# o3x dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
-# o3x dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
+# o3b dataset preprocess -d opentt
+# o3b dataset preprocess -d opentt --model Qwen/Qwen2-VL-2B-Instruct --device cuda:0
+# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-4B --device cuda:0
+# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-2B --device cuda:0
+# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
+# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
+# o3b dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
 
-# o3x dataset preprocess -d opentt --annotate
-# o3x dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0 --override
+# o3b dataset preprocess -d opentt --annotate
+# o3b dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0 --override
 
 # Qwen/Qwen3-VL-2B-Instruct
 class_name: OpenTT

@@ -1,16 +1,16 @@
 """
-o3x — od3d_basic command-line interface.
+o3b — od3d_basic command-line interface.
 
 Usage:
-  o3x dataset fetch  -d housecorr3d_object_pair [--url URL] [--platform PLATFORM]
-  o3x dataset index  -d housecorr3d_object_pair [--db FILE] [--platform PLATFORM]
-  o3x dataset viz    -d housecorr3d_object_pair [--db FILE] [--limit N] [--object-id ID]
+  o3b dataset fetch  -d housecorr3d_object_pair [--url URL] [--platform PLATFORM]
+  o3b dataset index  -d housecorr3d_object_pair [--db FILE] [--platform PLATFORM]
+  o3b dataset viz    -d housecorr3d_object_pair [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
                                          [--debug] [--platform PLATFORM]
-  o3x bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
-  o3x platform setup    -p <platform>
-  o3x platform stop  -p <platform> [-y]
+  o3b bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
+  o3b platform setup    -p <platform>
+  o3b platform stop  -p <platform> [-y]
 """
 from __future__ import annotations
 
@@ -338,7 +338,7 @@ def _run_platform_setup(args):
     path_home      = cfg.get("path_home", path_ws)
 
     # Walk up from __file__ to find the outermost git repo (the repo that
-    # contains od3d-basic as a submodule) via --show-superproject-working-tree.
+    # contains o3b as a submodule) via --show-superproject-working-tree.
     try:
         submodule_root = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
@@ -466,7 +466,7 @@ def _open_log(ssh_host: str, path_home: str, job: dict) -> None:
     )
     if check.stdout.strip() != "yes":
         print(f"\nLog not found: {log_path}")
-        print("(Jobs not submitted via `o3x platform setup` may write logs elsewhere.)")
+        print("(Jobs not submitted via `o3b platform setup` may write logs elsewhere.)")
         input("Press Enter to return…")
         return
     subprocess.run(["ssh", "-t", ssh_host, f"less +G {log_path!r}"])
@@ -975,7 +975,7 @@ def _build_bench_parser(sub):
     p_run = bench_sub.add_parser("run", help="Run benchmark(s) locally")
     _add_bench_args(p_run)
 
-    p_rrun = bench_sub.add_parser("rrun", help="Submit benchmark(s) as remote jobs via o3x platform run")
+    p_rrun = bench_sub.add_parser("rrun", help="Submit benchmark(s) as remote jobs via o3b platform run")
     _add_bench_args(p_rrun)
 
 
@@ -1189,7 +1189,7 @@ def _run_bench_rrun(args) -> None:
         files = [None]
 
     for ablation_file in files:
-        parts = ["o3x", "bench", "run",
+        parts = ["o3b", "bench", "run",
                  "-b", _repo_rel(args.benchmark),
                  "-p", platform]
         if ablation_file is not None:
@@ -1213,7 +1213,7 @@ def _run_bench_rrun(args) -> None:
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(
-        prog="o3x",
+        prog="o3b",
         description="od3d_basic CLI",
     )
     sub = parser.add_subparsers(dest="command", required=True)

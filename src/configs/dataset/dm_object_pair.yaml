@@ -15,10 +15,10 @@ item_type: object_pair
 #  - test
 
 
-# o3x dataset fetch -d densematcher_object_pair
-# o3x dataset index -d densematcher_object_pair
-# o3x dataset viz   -d densematcher_object_pair
+# o3b dataset fetch -d densematcher_object_pair
+# o3b dataset index -d densematcher_object_pair
+# o3b dataset viz   -d densematcher_object_pair
 
-# o3x dataset fetch -d densematcher_object_pair -p slurm
-# o3x dataset index -d densematcher_object_pair -p slurm
-# o3x dataset viz   -d densematcher_object_pair -p slurm
+# o3b dataset fetch -d densematcher_object_pair -p slurm
+# o3b dataset index -d densematcher_object_pair -p slurm
+# o3b dataset viz   -d densematcher_object_pair -p slurm

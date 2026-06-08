@@ -16,7 +16,7 @@ sudo apt-get install -y libegl1-mesa-dev
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 CUDA_HOME="$CUDA_HOME" pip install git+https://github.com/NVlabs/nvdiffrast.git --no-build-isolation
 
-pip install -e third_party/od3d-basic --no-build-isolation
+pip install -e third_party/o3b --no-build-isolation
 pip install -e .
 
 

@@ -1,5 +1,5 @@
 """
-Interactive axis-convention viewer  (o3x dataset tform -d <config>).
+Interactive axis-convention viewer  (o3b dataset tform -d <config>).
 
 Shows objects from the dataset one at a time in Viser with three coloured
 axis arrows:

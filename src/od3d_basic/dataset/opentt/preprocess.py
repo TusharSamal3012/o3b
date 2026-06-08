@@ -3,13 +3,13 @@
 Two-phase workflow
 ------------------
 Phase 1 — annotate (interactive, once per video):
-    o3x dataset preprocess -d opentt --annotate
+    o3b dataset preprocess -d opentt --annotate
     Shows a representative frame for each video and asks the user to draw
     three bounding boxes: whole scoreboard, left score, right score.
     Saved to {path_preprocess}/video_bboxes.json.
 
 Phase 2 — VLM inference (per-frame, resumable):
-    o3x dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
+    o3b dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
     Crops the left/right score regions using the saved bboxes and passes each
     crop to a VLM to read the integer score.
     Results are written to scoreboards.db.

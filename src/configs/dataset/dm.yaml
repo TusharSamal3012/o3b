@@ -1,10 +1,10 @@
-# o3x dataset fetch -d densematcher
-# o3x dataset index -d densematcher
-# o3x dataset viz   -d densematcher
+# o3b dataset fetch -d densematcher
+# o3b dataset index -d densematcher
+# o3b dataset viz   -d densematcher
 
-# o3x dataset fetch -d densematcher -p slurm
-# o3x dataset index -d densematcher -p slurm
-# o3x dataset viz   -d densematcher -p slurm
+# o3b dataset fetch -d densematcher -p slurm
+# o3b dataset index -d densematcher -p slurm
+# o3b dataset viz   -d densematcher -p slurm
 
 class_name: DenseMatcher
 

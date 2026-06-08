@@ -332,7 +332,7 @@ def _get_render_viewpoints(n_views: int, dist: float = 5.0, mesh=None) -> "Frame
 
     1  → get_front_viewpoint
     2  → get_front_top_viewpoints
-    ≥3 → get_front_top_right_viewpoints  (default for o3x dataset viz --render)
+    ≥3 → get_front_top_right_viewpoints  (default for o3b dataset viz --render)
     """
     if n_views == 1:
         return get_front_viewpoint(dist=dist, mesh=mesh)
