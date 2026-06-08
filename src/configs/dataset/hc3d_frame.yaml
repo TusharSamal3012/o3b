@@ -1,0 +1,23 @@
+defaults:
+  - hc3d
+  - _self_
+
+item_type: frame # frame, object, scene, frame_object, scene_object
+
+frame_modalities:
+  - rgb
+  #- obj_ncds0c_tform4x4_obj
+  #- obj_kpts3d
+  #- category
+
+#mesh_type: "mc16_vuni4_r256_fdinov2s"
+
+# o3x dataset fetch -d hc3d_object  
+# o3x dataset index -d hc3d_object
+# o3x dataset viz -d hc3d_object
+
+# split: train
+
+# o3x dataset fetch -d hc3d_object -p slurm  
+# o3x dataset index -d hc3d_object -p slurm
+# o3x dataset viz -d hc3d_object -p slurm

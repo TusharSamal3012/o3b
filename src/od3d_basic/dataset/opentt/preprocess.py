@@ -1,63 +1,22 @@
-"""Scoreboard detection and score reading for OpenTT via a Qwen VLM.
+"""Scoreboard bbox annotation and VLM-based score reading for OpenTT.
 
-For every frame in an OpenTT dataset instance the model is asked to:
-  1. Locate the on-screen scoreboard and return its 2-D bounding box.
-  2. Find the four individual score regions (left/right × point/game) with
-     their bounding boxes and integer values.
+Two-phase workflow
+------------------
+Phase 1 — annotate (interactive, once per video):
+    o3x dataset preprocess -d opentt --annotate
+    Shows a representative frame for each video and asks the user to draw
+    three bounding boxes: whole scoreboard, left score, right score.
+    Saved to {path_preprocess}/video_bboxes.json.
 
-The dataset is configured with scene_length = batch_size and the preprocess
-frame stride, so each Scene already contains exactly one batch of frames.
-scene.rgbs (T, H, W, 3) float32 in [0, 1] is converted to PIL images and
-passed to the VLM; results are keyed by (video_name, frame_idx) from the
-dataset's internal clip list.
-
-Results are written to a SQLite database with the schema:
-
-  CREATE TABLE scoreboards (
-      video_name   TEXT     NOT NULL,
-      frame_idx    INTEGER  NOT NULL,
-      bbox_x1      REAL,          -- whole scoreboard region (null if not found)
-      bbox_y1      REAL,
-      bbox_x2      REAL,
-      bbox_y2      REAL,
-      score_left   INTEGER,       -- left point score (backward-compat alias)
-      score_right  INTEGER,       -- right point score (backward-compat alias)
-      -- left player's point score (the big number)
-      bbox_left_point_x1  REAL,
-      bbox_left_point_y1  REAL,
-      bbox_left_point_x2  REAL,
-      bbox_left_point_y2  REAL,
-      score_left_point    INTEGER,
-      -- left player's game score (the small number)
-      bbox_left_game_x1   REAL,
-      bbox_left_game_y1   REAL,
-      bbox_left_game_x2   REAL,
-      bbox_left_game_y2   REAL,
-      score_left_game     INTEGER,
-      -- right player's point score (the big number)
-      bbox_right_point_x1  REAL,
-      bbox_right_point_y1  REAL,
-      bbox_right_point_x2  REAL,
-      bbox_right_point_y2  REAL,
-      score_right_point    INTEGER,
-      -- right player's game score (the small number)
-      bbox_right_game_x1   REAL,
-      bbox_right_game_y1   REAL,
-      bbox_right_game_x2   REAL,
-      bbox_right_game_y2   REAL,
-      score_right_game     INTEGER,
-      score_raw    TEXT,
-      PRIMARY KEY (video_name, frame_idx)
-  )
-
-The run is fully resumable: already-stored (video_name, frame_idx) pairs are
-skipped, so the command can be interrupted and restarted safely.
-Pass override=True to force re-processing of already-stored frames.
+Phase 2 — VLM inference (per-frame, resumable):
+    o3x dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
+    Crops the left/right score regions using the saved bboxes and passes each
+    crop to a VLM to read the integer score.
+    Results are written to scoreboards.db.
 """
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -66,160 +25,235 @@ from typing import Optional
 import torch
 from PIL import Image
 
-# Center-crop fractions applied before every VLM call.
-_CROP_HEIGHT_FRAC = 0.40
-_CROP_WIDTH_FRAC  = 0.25
-
-
-def _center_crop(img: Image.Image) -> Image.Image:
-    W, H = img.size
-    new_h = max(1, int(H * _CROP_HEIGHT_FRAC))
-    new_w = max(1, int(W * _CROP_WIDTH_FRAC))
-    top  = (H - new_h) // 2
-    left = (W - new_w) // 2
-    return img.crop((left, top, left + new_w, top + new_h))
+BBOXES_FILENAME = "video_bboxes.json"
 
 
 # ── SQLite schema ─────────────────────────────────────────────────────────────
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS scoreboards (
-    video_name   TEXT    NOT NULL,
-    frame_idx    INTEGER NOT NULL,
-    bbox_x1      REAL,
-    bbox_y1      REAL,
-    bbox_x2      REAL,
-    bbox_y2      REAL,
-    score_left   INTEGER,
-    score_right  INTEGER,
-    bbox_left_point_x1  REAL,
-    bbox_left_point_y1  REAL,
-    bbox_left_point_x2  REAL,
-    bbox_left_point_y2  REAL,
-    score_left_point    INTEGER,
-    bbox_left_game_x1   REAL,
-    bbox_left_game_y1   REAL,
-    bbox_left_game_x2   REAL,
-    bbox_left_game_y2   REAL,
-    score_left_game     INTEGER,
-    bbox_right_point_x1 REAL,
-    bbox_right_point_y1 REAL,
-    bbox_right_point_x2 REAL,
-    bbox_right_point_y2 REAL,
-    score_right_point   INTEGER,
-    bbox_right_game_x1  REAL,
-    bbox_right_game_y1  REAL,
-    bbox_right_game_x2  REAL,
-    bbox_right_game_y2  REAL,
-    score_right_game    INTEGER,
-    score_raw    TEXT,
+    video_name        TEXT    NOT NULL,
+    frame_idx         INTEGER NOT NULL,
+    bbox_x1           REAL,
+    bbox_y1           REAL,
+    bbox_x2           REAL,
+    bbox_y2           REAL,
+    score_left        INTEGER,
+    score_right       INTEGER,
+    score_left_point  INTEGER,
+    score_right_point INTEGER,
+    score_raw         TEXT,
     PRIMARY KEY (video_name, frame_idx)
 )
 """
 
-# Columns added after the initial schema — used to migrate existing DBs.
 _EXTRA_COLUMNS = [
-    ("bbox_left_point_x1",  "REAL"),
-    ("bbox_left_point_y1",  "REAL"),
-    ("bbox_left_point_x2",  "REAL"),
-    ("bbox_left_point_y2",  "REAL"),
-    ("score_left_point",    "INTEGER"),
-    ("bbox_left_game_x1",   "REAL"),
-    ("bbox_left_game_y1",   "REAL"),
-    ("bbox_left_game_x2",   "REAL"),
-    ("bbox_left_game_y2",   "REAL"),
-    ("score_left_game",     "INTEGER"),
-    ("bbox_right_point_x1", "REAL"),
-    ("bbox_right_point_y1", "REAL"),
-    ("bbox_right_point_x2", "REAL"),
-    ("bbox_right_point_y2", "REAL"),
-    ("score_right_point",   "INTEGER"),
-    ("bbox_right_game_x1",  "REAL"),
-    ("bbox_right_game_y1",  "REAL"),
-    ("bbox_right_game_x2",  "REAL"),
-    ("bbox_right_game_y2",  "REAL"),
-    ("score_right_game",    "INTEGER"),
+    ("score_left_point",  "INTEGER"),
+    ("score_right_point", "INTEGER"),
 ]
 
 
 def _migrate_db(con: sqlite3.Connection) -> None:
-    """Add any missing score-bbox columns to an existing DB."""
-    existing = {row[1] for row in con.execute("PRAGMA table_info(scoreboards)")}
+    existing = {row[1] for row in con.execute("PRAGMA table_info(scoreboards)").fetchall()}
     for col_name, col_type in _EXTRA_COLUMNS:
         if col_name not in existing:
             con.execute(f"ALTER TABLE scoreboards ADD COLUMN {col_name} {col_type}")
     con.commit()
 
 
-# ── VLM prompt ────────────────────────────────────────────────────────────────
+# ── Phase 1: interactive bbox annotation ──────────────────────────────────────
 
-_PROMPT = (
-    "This is a frame from a table tennis match broadcast.\n"
-    "Find the on-screen scoreboard or score overlay.\n\n"
-    "The scoreboard shows two sides separated by a divider:\n"
-    "  LEFT SIDE  — the half of the scoreboard on the LEFT of your screen.\n"
-    "  RIGHT SIDE — the half of the scoreboard on the RIGHT of your screen.\n\n"
-    "Each side shows a LARGE, prominent point score (ignore any small game/set numbers).\n\n"
-    "IMPORTANT: respond with a SINGLE flat JSON object — NOT an array, NOT nested objects.\n"
-    "The object must have exactly these three keys:\n"
-    '  "bbox"        – [x1,y1,x2,y2] where EVERY value is a FRACTION between 0.0 and 1.0\n'
-    '                  (x divided by image width, y divided by image height).\n'
-    '                  Do NOT use pixel values. Do NOT use percentages.\n'
-    '                  Bounding the entire scoreboard region, or null if none visible.\n'
-    '  "left_point"  – integer: the LARGE point score on the LEFT half of the scoreboard, or null.\n'
-    '  "right_point" – integer: the LARGE point score on the RIGHT half of the scoreboard, or null.\n\n'
-    "Both sides go into the SAME object. Do NOT use an array.\n\n"
-    "Correct example — bbox values are fractions 0.0–1.0, NOT pixels, NOT percentages:\n"
-    '{"bbox":[0.55,0.02,0.98,0.12],"left_point":9,"right_point":2}\n\n'
-    "Wrong (pixel coordinates — do NOT do this):\n"
-    '{"bbox":[1580,28,1900,85],"left_point":9,"right_point":2}\n\n'
-    "Wrong (percentages — do NOT do this):\n"
-    '{"bbox":[55,2,98,12],"left_point":9,"right_point":2}\n\n'
-    "Return only the JSON — no prose, no markdown fences."
-)
+def annotate_videos(dataset, bboxes_path: Path, *, override: bool = False) -> None:
+    """For each video draw scoreboard / left-score / right-score bboxes interactively."""
+    bboxes_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing: dict = {}
+    if bboxes_path.exists():
+        with bboxes_path.open() as f:
+            existing = json.load(f)
+
+    seen: set[str] = set()
+    videos: list[tuple[str, Path]] = []
+    for clip in dataset._clips:
+        name = clip["name"]
+        if name not in seen:
+            seen.add(name)
+            videos.append((name, clip["path"]))
+
+    n_done = 0
+    for name, video_path in videos:
+        if not override and name in existing:
+            print(f"  skip  {name}  (already annotated; use --override to redo)")
+            continue
+
+        n_frames = _video_frame_count(video_path)
+        result = _annotate_video(name, video_path, n_frames)
+        if result is None:
+            print(f"  skipped {name}")
+            continue
+
+        existing[name] = result
+        with bboxes_path.open("w") as f:
+            json.dump(existing, f, indent=2)
+        print(f"  saved  {name}  → {bboxes_path}")
+        n_done += 1
+
+    print(f"\nAnnotated {n_done} video(s). Bboxes → {bboxes_path}")
 
 
-# ── public entry point ────────────────────────────────────────────────────────
+def _annotate_video(name: str, video_path: Path, n_frames: int) -> Optional[dict]:
+    """Show a representative frame; ask the user to draw 3 ROIs. Returns bbox dict or None."""
+    import cv2
 
-def run_preprocess_from_dataset(
+    frame_idx = n_frames // 2
+    cap = cv2.VideoCapture(str(video_path))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ok, frame_bgr = cap.read()
+    cap.release()
+    if not ok:
+        print(f"  ERROR: could not read frame {frame_idx} from {video_path}", file=sys.stderr)
+        return None
+
+    print(f"\n  {name}  ({n_frames} frames, showing frame {frame_idx})")
+    print("  Drag to draw each box, press SPACE or ENTER to confirm, C to cancel.")
+
+    colors = {
+        "scoreboard": (0, 255, 0),
+        "left_score":  (255, 80, 80),
+        "right_score": (80, 80, 255),
+    }
+
+    # ── Step 1: draw scoreboard bbox on the full frame ────────────────────────
+    win = f"{name} - 1/3  whole scoreboard region"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    roi = cv2.selectROI(win, frame_bgr, showCrosshair=True, fromCenter=False)
+    cv2.destroyAllWindows()
+
+    if roi == (0, 0, 0, 0):
+        print("  Cancelled.")
+        return None
+
+    sb_x, sb_y, sb_w, sb_h = (int(v) for v in roi)
+    sb_bb = [sb_x, sb_y, sb_x + sb_w, sb_y + sb_h]
+    print(f"    scoreboard: {sb_bb}")
+
+    # ── Step 2 & 3: crop to scoreboard, draw left/right score bboxes ─────────
+    sb_crop = frame_bgr[sb_y: sb_y + sb_h, sb_x: sb_x + sb_w]
+
+    score_regions = [
+        ("left_score",  "2/3  left player score  (large number, left half)"),
+        ("right_score", "3/3  right player score (large number, right half)"),
+    ]
+
+    rel_bboxes: dict = {}   # relative to scoreboard crop
+    for key, label in score_regions:
+        display = sb_crop.copy()
+        for k, bb in rel_bboxes.items():
+            x1, y1, x2, y2 = bb
+            cv2.rectangle(display, (x1, y1), (x2, y2), colors[k], 2)
+            cv2.putText(display, k, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[k], 2)
+
+        win = f"{name} - {label}"
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        roi = cv2.selectROI(win, display, showCrosshair=True, fromCenter=False)
+        cv2.destroyAllWindows()
+
+        if roi == (0, 0, 0, 0):
+            print("  Cancelled.")
+            return None
+
+        rx, ry, rw, rh = (int(v) for v in roi)
+        rel_bboxes[key] = [rx, ry, rx + rw, ry + rh]
+        print(f"    {key}: {rel_bboxes[key]}  (relative to scoreboard crop)")
+
+    # Convert score bboxes back to full-frame coordinates
+    bboxes = {"scoreboard": sb_bb}
+    for key, (rx1, ry1, rx2, ry2) in rel_bboxes.items():
+        bboxes[key] = [sb_x + rx1, sb_y + ry1, sb_x + rx2, sb_y + ry2]
+        print(f"    {key}: {bboxes[key]}  (full frame)")
+
+    # Confirmation preview on full frame
+    display = frame_bgr.copy()
+    for k, bb in bboxes.items():
+        x1, y1, x2, y2 = bb
+        cv2.rectangle(display, (x1, y1), (x2, y2), colors[k], 2)
+        cv2.putText(display, k, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[k], 2)
+    win = f"{name} - confirm? (any key = accept, Q = redo)"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.imshow(win, display)
+    key = cv2.waitKey(0) & 0xFF
+    cv2.destroyAllWindows()
+
+    if key in (ord("q"), ord("Q")):
+        print("  Redoing annotation for this video…")
+        return _annotate_video(name, video_path, n_frames)
+
+    return bboxes
+
+
+# ── Phase 2: VLM score extraction ─────────────────────────────────────────────
+
+def _load_model(model_id: str, device: str):
+    """Load VLM model + processor. Supports Qwen3-VL and generic image-text models."""
+    from transformers import AutoProcessor
+
+    print(f"  Loading model {model_id} on {device} …")
+
+    if "qwen3-vl" in model_id.lower():
+        from transformers import Qwen3VLForConditionalGeneration
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16 if "cuda" in device else torch.float32,
+            device_map=device,
+        )
+    else:
+        from transformers import AutoModelForImageTextToText
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16 if "cuda" in device else torch.float32,
+            device_map=device,
+        )
+
+    processor = AutoProcessor.from_pretrained(model_id)
+    model.eval()
+    print(f"  Model ready.\n")
+    return model, processor
+
+
+def run_vlm_from_dataset(
     dataset,
     db_path: Path,
+    bboxes_path: Path,
     *,
-    model_id: str = "Qwen/Qwen3.5-4B",
-    device: str = "auto",
+    model_id: str,
+    device: str = "cpu",
     override: bool = False,
     debug: bool = False,
 ) -> None:
-    """Detect scoreboards by iterating over an OpenTT dataset instance.
+    """Crop annotated score regions per frame, run VLM, store results in SQLite."""
+    if not bboxes_path.exists():
+        print(
+            f"ERROR: bbox annotations not found at {bboxes_path}.\n"
+            "Run with --annotate first to draw the score bounding boxes.",
+            file=sys.stderr,
+        )
+        return
 
-    The dataset must already be configured with the desired frame stride and
-    scene_length = batch_size.  Each Scene provides exactly one batch of
-    frames via scene.rgbs (T, H, W, 3).
+    with bboxes_path.open() as f:
+        video_bboxes: dict = json.load(f)
 
-    Args:
-        dataset:   OpenTT instance (scene_length = desired batch size,
-                   frame_stride = preprocess stride, non-overlapping clips).
-        db_path:   SQLite output file (created / appended to).
-        model_id:  Hugging Face model ID for the VLM.
-        device:    "auto", "cuda:0", "cpu", etc.
-        override:  If True, re-process already-stored frames (default: skip).
-        debug:     If True, show each center-cropped image and print the prompt
-                   before sending to the VLM.
-    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, timeout=30)
     con.execute(_SCHEMA)
     con.commit()
     _migrate_db(con)
 
-    # Already-processed (video_name, frame_idx) pairs — for resumability.
-    # When override=True we ignore the existing rows and re-process everything.
     if override:
         done: set[tuple[str, int]] = set()
     else:
         done = {
             (row[0], int(row[1]))
-            for row in con.execute("SELECT video_name, frame_idx FROM scoreboards")
+            for row in con.execute("SELECT video_name, frame_idx FROM scoreboards").fetchall()
         }
 
     n_clips   = len(dataset)
@@ -232,22 +266,21 @@ def run_preprocess_from_dataset(
     print(f"  {n_clips} clips total — {n_skipped} fully done, "
           f"{n_clips - n_skipped} to process\n")
 
-    model, processor = _load_model(model_id, device=device)
-
-    if debug:
-        print(
-            f"\n{'='*60}\n"
-            f"DEBUG — center crop: {_CROP_HEIGHT_FRAC*100:.0f}% height × "
-            f"{_CROP_WIDTH_FRAC*100:.0f}% width\n"
-            f"PROMPT:\n{_PROMPT}\n"
-            f"{'='*60}\n"
-        )
+    model, processor = _load_model(model_id, device)
 
     try:
         for idx in range(n_clips):
             clip    = dataset._clips[idx]
             name    = clip["name"]
-            indices = clip["indices"]  # list of absolute frame indices
+            indices = clip["indices"]
+
+            if name not in video_bboxes:
+                continue
+
+            bboxes  = video_bboxes[name]
+            sb_bb   = bboxes.get("scoreboard")
+            l_bb    = bboxes.get("left_score")
+            r_bb    = bboxes.get("right_score")
 
             pending = [i for i, fi in enumerate(indices) if (name, fi) not in done]
             if not pending:
@@ -257,14 +290,7 @@ def run_preprocess_from_dataset(
             if scene.rgbs is None:
                 continue
 
-            imgs: list[Image.Image] = []
-            fis:  list[int]         = []
-            for i in pending:
-                frame  = scene.rgbs[i]  # (H, W, 3)
-                np_img = (frame.clamp(0, 1).cpu().numpy() * 255).astype("uint8")
-                imgs.append(Image.fromarray(np_img))
-                fis.append(indices[i])
-
+            fis = [indices[i] for i in pending]
             sys.stdout.write(
                 f"  [{idx + 1:>{len(str(n_clips))}}/{n_clips}]"
                 f"  {name}  frames {fis[0]:,}…{fis[-1]:,}"
@@ -272,271 +298,226 @@ def run_preprocess_from_dataset(
             )
             sys.stdout.flush()
 
-            _infer_and_save(name, fis, imgs, con, model, processor, debug=debug)
-            done.update((name, fi) for fi in fis)
+            for i in pending:
+                fi    = indices[i]
+                frame = scene.rgbs[i]
+                img   = Image.fromarray(
+                    (frame.clamp(0, 1).cpu().numpy() * 255).astype("uint8")
+                )
+
+                left_crop  = img.crop(l_bb) if l_bb else None
+                right_crop = img.crop(r_bb) if r_bb else None
+
+                if debug:
+                    if left_crop:
+                        _show_crop(left_crop)
+                    if right_crop:
+                        _show_crop(right_crop)
+
+                left_score  = _vlm_score(left_crop,  model, processor, debug=debug) if left_crop  else None
+                right_score = _vlm_score(right_crop, model, processor, debug=debug) if right_crop else None
+
+                con.execute(
+                    "INSERT OR REPLACE INTO scoreboards "
+                    "(video_name, frame_idx, "
+                    " bbox_x1, bbox_y1, bbox_x2, bbox_y2, "
+                    " score_left, score_right, "
+                    " score_left_point, score_right_point, score_raw) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        name, fi,
+                        sb_bb[0] if sb_bb else None, sb_bb[1] if sb_bb else None,
+                        sb_bb[2] if sb_bb else None, sb_bb[3] if sb_bb else None,
+                        left_score, right_score,
+                        left_score, right_score,
+                        None,
+                    ),
+                )
+                done.add((name, fi))
+
+                sys.stdout.write(
+                    f"    frame {fi:7,d}  L:{left_score}  R:{right_score}\n"
+                )
+                sys.stdout.flush()
+
+            con.commit()
 
     finally:
         con.close()
 
-    print(f"\nDone. Results → {db_path}")
+    print(f"\nVLM inference done. Results → {db_path}")
+    postprocess_scores(db_path)
 
 
-# ── model loading ─────────────────────────────────────────────────────────────
-
-def _load_model(model_id: str, *, device: str = "auto"):
-    import os
-    from transformers import AutoProcessor
-
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-    print(f"Loading {model_id} …")
-    processor = AutoProcessor.from_pretrained(model_id)
-
-    use_cuda = torch.cuda.is_available()
-    dtype = torch.bfloat16 if (use_cuda and device != "cpu") else torch.float32
-
-    if "qwen3-vl" in model_id.lower():
-        from transformers import Qwen3VLForConditionalGeneration
-        model_cls = Qwen3VLForConditionalGeneration
-    else:
-        from transformers import AutoModelForImageTextToText
-        model_cls = AutoModelForImageTextToText
-
-    def _try_load(device_map):
-        return model_cls.from_pretrained(
-            model_id,
-            dtype=dtype,
-            device_map=device_map,
-        )
-
-    try:
-        model = _try_load(device)
-    except (torch.OutOfMemoryError, RuntimeError) as exc:
-        if "out of memory" not in str(exc).lower() or not use_cuda:
-            raise
-        print(f"  WARNING: GPU OOM — falling back to CPU (hint: use --device cuda:0 "
-              f"to pin to your 24 GB GPU)\n  Error was: {exc}")
-        torch.cuda.empty_cache()
-        model = _try_load("cpu")
-
-    model.eval()
-    actual_device = next(model.parameters()).device
-    print(f"  device: {actual_device}  dtype: {next(model.parameters()).dtype}\n")
-    return model, processor
+_VLM_PROMPT = (
+    "What integer number is shown in this image? "
+    "Reply with ONLY the integer, nothing else."
+)
 
 
-# ── VLM inference ─────────────────────────────────────────────────────────────
-
-def _infer_and_save(
-    name: str,
-    indices: list[int],
-    imgs: list[Image.Image],
-    con: sqlite3.Connection,
+def _vlm_score(
+    crop: Image.Image,
     model,
     processor,
     *,
     debug: bool = False,
-) -> None:
-    rows = _query_batch(imgs, model, processor, debug=debug)
+) -> Optional[int]:
+    """Pass a score-region crop to the VLM and return the parsed integer."""
+    import re
+    from qwen_vl_utils import process_vision_info
 
-    for fi, row in zip(indices, rows):
-        con.execute(
-            "INSERT OR REPLACE INTO scoreboards "
-            "(video_name, frame_idx, "
-            " bbox_x1, bbox_y1, bbox_x2, bbox_y2, "
-            " score_left, score_right, "
-            " bbox_left_point_x1, bbox_left_point_y1,"
-            " bbox_left_point_x2, bbox_left_point_y2, score_left_point, "
-            " bbox_left_game_x1,  bbox_left_game_y1,"
-            " bbox_left_game_x2,  bbox_left_game_y2,  score_left_game, "
-            " bbox_right_point_x1, bbox_right_point_y1,"
-            " bbox_right_point_x2, bbox_right_point_y2, score_right_point, "
-            " bbox_right_game_x1,  bbox_right_game_y1,"
-            " bbox_right_game_x2,  bbox_right_game_y2,  score_right_game, "
-            " score_raw) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
-            "        ?, ?, ?, ?, ?, "
-            "        ?, ?, ?, ?, ?, "
-            "        ?, ?, ?, ?, ?, "
-            "        ?, ?, ?, ?, ?, "
-            "        ?)",
-            (
-                name, fi,
-                row.get("bbox_x1"), row.get("bbox_y1"),
-                row.get("bbox_x2"), row.get("bbox_y2"),
-                row.get("score_left"), row.get("score_right"),
-                row.get("bbox_left_point_x1"), row.get("bbox_left_point_y1"),
-                row.get("bbox_left_point_x2"), row.get("bbox_left_point_y2"),
-                row.get("score_left_point"),
-                row.get("bbox_left_game_x1"),  row.get("bbox_left_game_y1"),
-                row.get("bbox_left_game_x2"),  row.get("bbox_left_game_y2"),
-                row.get("score_left_game"),
-                row.get("bbox_right_point_x1"), row.get("bbox_right_point_y1"),
-                row.get("bbox_right_point_x2"), row.get("bbox_right_point_y2"),
-                row.get("score_right_point"),
-                row.get("bbox_right_game_x1"),  row.get("bbox_right_game_y1"),
-                row.get("bbox_right_game_x2"),  row.get("bbox_right_game_y2"),
-                row.get("score_right_game"),
-                row.get("raw"),
-            ),
-        )
-    con.commit()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": crop},
+                {"type": "text", "text": _VLM_PROMPT},
+            ],
+        }
+    ]
 
-    for fi, row in zip(indices, rows):
-        has_bbox = "bbox_x1" in row
-        bbox_str = (
-            f"[{row['bbox_x1']:.0f},{row['bbox_y1']:.0f},"
-            f"{row['bbox_x2']:.0f},{row['bbox_y2']:.0f}]"
-            if has_bbox else "—"
-        )
-        lp = row.get("score_left_point")
-        rp = row.get("score_right_point")
-        score_str = f"L:{lp}  R:{rp}" if (lp is not None or rp is not None) else "—"
-        sys.stdout.write(
-            f"    frame {fi:7,d}  bbox {bbox_str:<32s}  score {score_str}\n"
-        )
-    sys.stdout.flush()
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    image_inputs, video_inputs = process_vision_info(messages)
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
+        return_tensors="pt",
+    ).to(model.device)
 
+    with torch.no_grad():
+        generated_ids = model.generate(**inputs, max_new_tokens=16)
 
-def _query_batch(imgs: list[Image.Image], model, processor, *, debug: bool = False) -> list[dict]:
-    """Center-crop each image, optionally show it for debugging, then run the VLM."""
-    results = []
-    for i, img in enumerate(imgs):
-        orig_w, orig_h = img.size
-        cropped = _center_crop(img)
-        crop_w, crop_h = cropped.size
-        crop_left = (orig_w - crop_w) // 2
-        crop_top  = (orig_h - crop_h) // 2
+    trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+    raw = processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 
-        if debug:
-            import numpy as np
-            from od3d_basic.cv.visual.show import show_img
-            sys.stdout.write(
-                f"  [debug] frame {i}  original {orig_w}×{orig_h}"
-                f"  → crop {crop_w}×{crop_h}"
-                f"  (center {_CROP_WIDTH_FRAC*100:.0f}%W × {_CROP_HEIGHT_FRAC*100:.0f}%H)"
-                f"  offset ({crop_left}, {crop_top})\n"
-            )
-            sys.stdout.flush()
-            rgb_tensor = torch.from_numpy(np.array(cropped)).float().permute(2, 0, 1) / 255.0
-            show_img(rgb_tensor)
+    if debug:
+        sys.stdout.write(f"      VLM raw output: {raw!r}\n")
+        sys.stdout.flush()
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": cropped},
-                    {"type": "text", "text": _PROMPT},
-                ],
-            }
-        ]
-        inputs = processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(model.device)
-
-        with torch.no_grad():
-            generated_ids = model.generate(
-                **inputs,
-                max_new_tokens=256,
-                do_sample=False,
-            )
-
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):]
-            for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
-        ]
-        output = processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
-        if debug:
-            sys.stdout.write(f"  [debug] raw output:\n{output}\n")
-            sys.stdout.flush()
-
-        row = _parse_response(output)
-        row = _crop_frac_to_full_pixels(row, crop_left, crop_top, crop_w, crop_h)
-        results.append(row)
-    return results
-
-
-def _crop_frac_to_full_pixels(row: dict, crop_left: int, crop_top: int,
-                               crop_w: int, crop_h: int) -> dict:
-    """Convert bbox from crop-relative fractions (0.0–1.0) to full-frame pixel coords."""
-    if "bbox_x1" not in row:
-        return row
-    row["bbox_x1"] = round(crop_left + row["bbox_x1"] * crop_w)
-    row["bbox_y1"] = round(crop_top  + row["bbox_y1"] * crop_h)
-    row["bbox_x2"] = round(crop_left + row["bbox_x2"] * crop_w)
-    row["bbox_y2"] = round(crop_top  + row["bbox_y2"] * crop_h)
-    return row
-
-
-# ── response parsing ──────────────────────────────────────────────────────────
-
-def _parse_response(text: str) -> dict:
-    text = text.strip()
-
-    parsed = _try_json(text)
-    if parsed is not None:
-        if isinstance(parsed, list):
-            parsed = _merge_array(parsed)
-        return _normalise(parsed, text)
-
-    m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-    if m:
-        parsed = _try_json(m.group())
-        if parsed is not None:
-            return _normalise(parsed, text)
-
-    return {"raw": text}
-
-
-def _merge_array(items: list) -> dict:
-    """Merge a list of partial score dicts (model split left/right) into one."""
-    merged: dict = {}
-    for item in items:
-        if isinstance(item, dict):
-            merged.update(item)
-    return merged
-
-
-def _try_json(s: str) -> Optional[dict]:
+    raw = raw.strip()
     try:
-        result = json.loads(s)
-        return result if isinstance(result, dict) else None
-    except json.JSONDecodeError:
-        return None
+        return int(raw)
+    except ValueError:
+        m = re.search(r"\d+", raw)
+        return int(m.group()) if m else None
 
 
-def _normalise(d: dict, raw: str) -> dict:
-    result: dict = {"raw": raw}
+def _show_crop(crop: Image.Image) -> None:
+    import numpy as np
+    from od3d_basic.cv.visual.show import show_img
+    rgb = torch.from_numpy(
+        np.array(crop.convert("RGB"))
+    ).float().permute(2, 0, 1) / 255.0
+    show_img(rgb)
 
-    bbox = d.get("bbox")
-    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-        try:
-            x1, y1, x2, y2 = (float(v) for v in bbox)
-            result.update(bbox_x1=x1, bbox_y1=y1, bbox_x2=x2, bbox_y2=y2)
-        except (TypeError, ValueError):
-            pass
 
-    # Parse the two point scores (plain integers).
-    for region in ("left_point", "right_point"):
-        val = d.get(region)
-        if val is not None:
-            try:
-                result[f"score_{region}"] = int(val)
-            except (TypeError, ValueError):
-                pass
+def postprocess_scores(db_path: Path) -> None:
+    """Enforce score monotonicity per video.
 
-    # Populate backward-compat score_left / score_right from point scores.
-    if "score_left_point" in result:
-        result.setdefault("score_left", result["score_left_point"])
-    if "score_right_point" in result:
-        result.setdefault("score_right", result["score_right_point"])
+    A score is valid only if it equals the previous score or previous score + 1.
+    Invalid (or None) scores are replaced with the previous valid score.
+    """
+    if not db_path.exists():
+        print(f"No database found at {db_path} — nothing to post-process.")
+        return
 
-    return result
+    con = sqlite3.connect(db_path, timeout=30)
+    try:
+        rows = con.execute(
+            "SELECT video_name, frame_idx, score_left_point, score_right_point "
+            "FROM scoreboards ORDER BY video_name, frame_idx"
+        ).fetchall()
+
+        prev: dict[str, tuple] = {}   # video_name -> (left, right)
+        updates: list = []
+
+        for video_name, frame_idx, left, right in rows:
+            # Clamp out-of-range readings to 0 before monotonicity check
+            if left  is not None and not (0 <= left  <= 11):
+                left  = 0
+            if right is not None and not (0 <= right <= 11):
+                right = 0
+
+            p_left, p_right = prev.get(video_name, (None, None))
+
+            new_left = left
+            if p_left is not None:
+                if left is None or (left != p_left and left != p_left + 1):
+                    new_left = p_left
+
+            new_right = right
+            if p_right is not None:
+                if right is None or (right != p_right and right != p_right + 1):
+                    new_right = p_right
+
+            if new_left != left or new_right != right:
+                updates.append((new_left, new_right, new_left, new_right, video_name, frame_idx))
+
+            prev[video_name] = (
+                new_left  if new_left  is not None else p_left,
+                new_right if new_right is not None else p_right,
+            )
+
+        if updates:
+            con.executemany(
+                "UPDATE scoreboards "
+                "SET score_left=?, score_right=?, score_left_point=?, score_right_point=? "
+                "WHERE video_name=? AND frame_idx=?",
+                updates,
+            )
+            con.commit()
+            print(f"  Post-processed {len(updates)} frame(s) with out-of-range scores.")
+        else:
+            print("  Post-processing: all scores already valid.")
+    finally:
+        con.close()
+
+
+def _video_frame_count(path: Path) -> int:
+    import cv2
+    cap = cv2.VideoCapture(str(path))
+    n   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return max(n, 0)
+
+
+# ── public entry point ────────────────────────────────────────────────────────
+
+def run_preprocess_from_dataset(
+    dataset,
+    db_path: Path,
+    bboxes_path: Path,
+    *,
+    model_id: str = "Qwen/Qwen3-VL-2B-Instruct",
+    device: str = "cpu",
+    annotate: bool = False,
+    override: bool = False,
+    debug: bool = False,
+    remove: bool = False,
+) -> None:
+    if remove:
+        _remove_scores(db_path)
+    elif annotate:
+        annotate_videos(dataset, bboxes_path, override=override)
+    else:
+        run_vlm_from_dataset(
+            dataset, db_path, bboxes_path,
+            model_id=model_id, device=device,
+            override=override, debug=debug,
+        )
+
+
+
+def _remove_scores(db_path: Path) -> None:
+    if not db_path.exists():
+        print(f"No database found at {db_path} — nothing to remove.")
+        return
+    import sqlite3
+    con = sqlite3.connect(db_path, timeout=30)
+    n = con.execute("SELECT COUNT(*) FROM scoreboards").fetchone()[0]
+    con.execute("DELETE FROM scoreboards")
+    con.commit()
+    con.close()
+    print(f"Removed {n} rows from scoreboards table in {db_path}.")

@@ -199,56 +199,41 @@ class OpenTT(ConfigurableDataset):
         cfg: DatasetConfig,
         *,
         db: Optional[Path] = None,
-        model_id: str = "Qwen/Qwen3.5-4B",
-        frame_stride: int = 30,
-        batch_size: int = 4,
+        model_id: str = "Qwen/Qwen3-VL-2B-Instruct",
+        device: str = "cpu",
         video: Optional[str] = None,
-        device: str = "auto",
+        annotate: bool = False,
         override: bool = False,
         debug: bool = False,
+        remove: bool = False,
     ) -> None:
-        """Detect scoreboards and read scores via a Qwen VLM; store in SQLite.
+        """Annotate per-video score bboxes interactively, then extract scores via VLM.
 
-        Instantiates the OpenTT dataset configured for preprocessing (non-
-        overlapping clips of *batch_size* frames sampled every *frame_stride*
-        frames), then iterates over Scene instances and passes scene.rgbs to
-        the VLM.  Results are written to *db* (default:
-        {path_preprocess}/scoreboards.db).  Already-processed frames are
-        skipped, so the command is safely resumable.
+        Two-phase workflow:
+          --annotate  Draw the scoreboard / left-score / right-score bboxes for
+                      each video once (saved to video_bboxes.json).
+          (default)   Use the saved bboxes and a VLM to read scores on every
+                      sampled frame and store results in scoreboards.db.
 
         Args:
-            cfg:          dataset configuration (paths, split).
-            db:           SQLite output path; defaults to {path_preprocess}/scoreboards.db.
-            model_id:     Hugging Face model ID for the VLM.
-            frame_stride: sample every Nth frame (default 30 → ~4 fps at 120 fps).
-            batch_size:   frames per model forward pass (= scene_length of the
-                          preprocess dataset).
-            video:        if set, restrict to this single video name (e.g. "game_1").
-            device:       "auto", "cuda:0", "cpu", …
+            cfg:      dataset configuration (paths, split, frame_stride, …).
+            db:       SQLite output path; defaults to {path_preprocess}/scoreboards.db.
+            model_id: HuggingFace model ID for VLM score reading.
+            device:   torch device for VLM inference, e.g. "cuda:0".
+            video:    restrict to a single video name, e.g. "game_1".
+            annotate: if True, run interactive bbox annotation instead of VLM.
+            override: re-annotate / re-process already-handled items.
+            debug:    show crops and raw VLM output during processing.
         """
-        import types
-        from od3d_basic.dataset.opentt.preprocess import run_preprocess_from_dataset
-
-        path_raw        = Path(cfg.path_raw)        if cfg.path_raw        else Path(cfg.root) / "opentt"
-        path_preprocess = Path(cfg.path_preprocess) if cfg.path_preprocess else path_raw
-        db_path         = Path(db) if db else path_preprocess / "scoreboards.db"
-
-        # Lightweight config for the preprocess dataset:
-        #   - scene_length = batch_size so each Scene holds exactly one forward-pass batch
-        #   - clip_stride  = batch_size * frame_stride → non-overlapping, exhaustive coverage
-        preprocess_cfg = types.SimpleNamespace(
-            path_raw         = path_raw,
-            path_preprocess  = path_preprocess,
-            split            = cfg.split,
-            scene_length     = batch_size,
-            filter_count_max = cfg.filter_count_max,
-            extra            = {
-                "frame_stride": frame_stride,
-                "clip_stride" : batch_size * frame_stride,
-            },
+        from od3d_basic.dataset.opentt.preprocess import (
+            run_preprocess_from_dataset, BBOXES_FILENAME,
         )
 
-        dataset = cls(preprocess_cfg)
+        path_preprocess = Path(cfg.path_preprocess) if cfg.path_preprocess else Path(cfg.path_raw)
+        db_path         = Path(db) if db else path_preprocess / "scoreboards.db"
+        bboxes_path     = path_preprocess / BBOXES_FILENAME
+
+        dataset = cls(cfg)
 
         if video:
             dataset._clips = [c for c in dataset._clips if c["name"] == video]
@@ -260,14 +245,20 @@ class OpenTT(ConfigurableDataset):
             )
             return
 
-        n_videos = len({c["name"] for c in dataset._clips})
+        frame_stride = int(cfg.extra.get("frame_stride", 1))
+        n_videos     = len({c["name"] for c in dataset._clips})
+        phase        = "annotating" if annotate else "VLM preprocessing"
         print(
-            f"Scoreboard preprocessing: {len(dataset._clips)} clips "
-            f"({n_videos} video(s), stride={frame_stride}, batch={batch_size})"
-            f"  →  {db_path}"
+            f"Scoreboard {phase}: {n_videos} video(s), "
+            f"stride={frame_stride}"
+            + (f"  →  {db_path}" if not annotate else f"  →  {bboxes_path}")
         )
-        run_preprocess_from_dataset(dataset, db_path, model_id=model_id, device=device,
-                                    override=override, debug=debug)
+        run_preprocess_from_dataset(
+            dataset, db_path, bboxes_path,
+            model_id=model_id, device=device,
+            annotate=annotate, override=override, debug=debug,
+            remove=remove,
+        )
 
     @classmethod
     def fetch(cls, cfg: DatasetConfig, *, url: Optional[str] = None) -> None:
@@ -364,6 +355,7 @@ class OpenTT(ConfigurableDataset):
         db: Optional[Path] = None,
         limit: int = 4,
         object_id: Optional[str] = None,
+        frame_stride: Optional[int] = None,
         render: bool = False,
         render_frames: int = 0,
         renderer: str = "pyrender",
@@ -396,25 +388,165 @@ class OpenTT(ConfigurableDataset):
                 )
                 return
 
-        n = min(limit, len(clips))
+        # Collect unique videos in order of first appearance
+        seen: set[str] = set()
+        videos: list[tuple[str, Path]] = []
+        for c in clips:
+            if c["name"] not in seen:
+                seen.add(c["name"])
+                videos.append((c["name"], c["path"]))
+
+        n = min(limit, len(videos))
         print(
-            f"Visualising {n} / {len(clips)} clips"
+            f"Visualising {n} / {len(videos)} video(s)"
             + (f" (filtered to '{object_id}')" if object_id else "")
             + f"  [{dataset._path_raw}]"
         )
 
-        for i in range(n):
-            clip_info = clips[i]
-            # Re-index into the dataset by matching the stored clip
-            try:
-                idx = dataset._clips.index(clip_info)
-            except ValueError:
-                continue
-            scene = dataset[idx]
-            strip = scene.viz(show=True)
-            if debug and strip is not None:
-                print(f"  [{i}] {scene.scene_id}  strip: {tuple(strip.shape)}  "
-                      f"events: {scene.events}")
+        ds_frame_stride = int(cfg.extra.get("frame_stride", 1))
+        ds_scene_length = cfg.scene_length
+        if frame_stride is None:
+            frame_stride = ds_frame_stride
+
+        for name, video_path in videos[:n]:
+            _viz_video_interactive(
+                name, video_path, dataset._scoreboards,
+                frame_stride=frame_stride,
+                ds_frame_stride=ds_frame_stride,
+                ds_scene_length=ds_scene_length,
+            )
+
+
+# ── interactive viewer ────────────────────────────────────────────────────────
+
+def _viz_video_interactive(
+    video_name: str,
+    video_path: Path,
+    scoreboards: dict,
+    *,
+    frame_stride: int = 1,
+    ds_frame_stride: int = 1,
+    ds_scene_length: int = 1,
+) -> None:
+    """Show a full video with frame-scrubbing and stride trackbars, and score overlay.
+
+    Controls:
+      Space       play / pause
+      ← / →       jump by current stride
+      Q / Esc     close and move to next video
+    """
+    import cv2
+
+    cap = cv2.VideoCapture(str(video_path))
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+    if n_frames == 0:
+        cap.release()
+        return
+
+    max_stride = max(1, n_frames // 10)
+
+    win = video_name
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+
+    current  = [0]
+    playing  = [False]
+    prev_idx = [-1]
+    stride   = [max(1, min(frame_stride, max_stride))]
+
+    def on_frame(pos: int)  -> None: current[0] = pos
+    def on_stride(pos: int) -> None: stride[0]  = max(1, pos)
+
+    cv2.createTrackbar("Frame",  win, 0,                       max(n_frames - 1, 1), on_frame)
+    cv2.createTrackbar("Stride", win, stride[0], max_stride,   on_stride)
+
+    print(
+        f"  {video_name}  ({n_frames} frames @ {fps:.0f} fps)  —  "
+        "Space: play/pause   ←→: jump by stride   Q/Esc: next video"
+    )
+
+    frame_bgr = None
+
+    while True:
+        idx = current[0]
+
+        if idx != prev_idx[0]:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+            prev_idx[0] = idx
+
+        display = frame_bgr.copy()
+        H, W    = display.shape[:2]
+
+        sb          = _nearest_scoreboard(scoreboards, video_name, idx) if scoreboards else None
+        left_score  = sb.get("score_left_point")  if sb else None
+        right_score = sb.get("score_right_point") if sb else None
+
+        l_str = str(left_score)  if left_score  is not None else "?"
+        r_str = str(right_score) if right_score is not None else "?"
+        ts    = f"{idx / fps:.1f}s"
+
+        cv2.setWindowTitle(
+            win,
+            f"{video_name}  |  {ts}  (frame {idx} @ {fps:.0f} fps, stride {stride[0]})  |  L: {l_str}   R: {r_str}",
+        )
+
+        # On-frame text overlay
+        font      = cv2.FONT_HERSHEY_SIMPLEX
+        scale     = max(W, H) / 700.0
+        thickness = max(1, round(scale * 2))
+        margin    = max(8, int(W * 0.015))
+        y_pos     = max(20, int(H * 0.06))
+
+        line_h = int(y_pos * 1.4)
+
+        def _put(text: str, x: int, y: int, color: tuple) -> None:
+            cv2.putText(display, text, (x, y), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+            cv2.putText(display, text, (x, y), font, scale, color,     thickness,     cv2.LINE_AA)
+
+        _put(f"L: {l_str}", margin, y_pos, (80, 220, 80))
+        r_tw = cv2.getTextSize(f"R: {r_str}", font, scale, thickness)[0][0]
+        _put(f"R: {r_str}", W - r_tw - margin, y_pos, (80, 80, 220))
+
+        # Scene label — second row, centre
+        scene_span = ds_frame_stride * ds_scene_length
+        scene_idx  = idx // scene_span
+        frame_pos  = (idx % scene_span) // ds_frame_stride
+        if (idx % scene_span) % ds_frame_stride == 0:
+            scene_txt = f"scene {scene_idx}  [{frame_pos + 1}/{ds_scene_length}]"
+        else:
+            scene_txt = f"scene {scene_idx}  (gap)"
+        sc_tw = cv2.getTextSize(scene_txt, font, scale, thickness)[0][0]
+        _put(scene_txt, (W - sc_tw) // 2, y_pos + line_h, (220, 220, 80))
+
+        cv2.imshow(win, display)
+        cv2.setTrackbarPos("Frame", win, idx)
+
+        delay = max(1, int(1000 / fps)) if playing[0] else 30
+        key   = cv2.waitKey(delay) & 0xFF
+
+        if key in (27, ord('q'), ord('Q')):
+            break
+        elif key == ord(' '):
+            playing[0] = not playing[0]
+        elif key in (83, 3, ord('d')):          # → or d
+            playing[0] = False
+            current[0] = min(idx + stride[0], n_frames - 1)
+        elif key in (81, 2, ord('a')):          # ← or a
+            playing[0] = False
+            current[0] = max(idx - stride[0], 0)
+        elif playing[0]:
+            nxt = idx + 1
+            if nxt >= n_frames:
+                playing[0] = False
+            else:
+                current[0] = nxt
+
+    cap.release()
+    cv2.destroyWindow(win)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -467,7 +599,7 @@ def _load_scoreboards(db_path: Path) -> dict:
 
     import sqlite3
 
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, timeout=30)
     try:
         existing_cols = {row[1] for row in con.execute("PRAGMA table_info(scoreboards)")}
 

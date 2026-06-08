@@ -51,6 +51,11 @@ def _build_dataset_parser(sub):
     p_vis.add_argument("--db", type=Path, default=None, metavar="FILE")
     p_vis.add_argument("--limit", type=int, default=20, metavar="N")
     p_vis.add_argument("--object-id", default=None, metavar="ID")
+    p_vis.add_argument(
+        "--frame-stride", type=int, default=None, metavar="N",
+        help="Initial ←/→ jump size in frames (default: frame_stride from dataset config); "
+             "can also be changed via the Stride trackbar",
+    )
     p_vis.add_argument("--filter-has-kpts", action="store_true")
     p_vis.add_argument("--render", action="store_true")
     p_vis.add_argument("--render-frames", type=int, default=4, metavar="N")
@@ -68,7 +73,7 @@ def _build_dataset_parser(sub):
 
     p_pre = ds_sub.add_parser(
         "preprocess",
-        help="Run VLM-based preprocessing (OpenTT: scoreboard detection + score reading)",
+        help="OpenTT: annotate score bboxes interactively, then extract scores via VLM",
     )
     _add_config(p_pre)
     p_pre.add_argument(
@@ -76,33 +81,34 @@ def _build_dataset_parser(sub):
         help="SQLite output file (default: <path_preprocess>/scoreboards.db)",
     )
     p_pre.add_argument(
-        "--model", default="Qwen/Qwen3.5-4B", metavar="MODEL",
-        help="Hugging Face VLM model ID (default: Qwen/Qwen3.5-4B)",
+        "--annotate", action="store_true",
+        help="Draw the scoreboard / left-score / right-score bboxes interactively "
+             "for each video (saved to video_bboxes.json). Run this once before VLM.",
     )
     p_pre.add_argument(
-        "--frame-stride", type=int, default=30, metavar="N",
-        help="Process every Nth frame — default 30 gives ~4 fps on 120-fps footage",
+        "--model", default="Qwen/Qwen3-VL-2B-Instruct", metavar="MODEL_ID",
+        help="HuggingFace model ID for VLM score reading "
+             "(default: Qwen/Qwen3-VL-2B-Instruct)",
     )
     p_pre.add_argument(
-        "--batch-size", type=int, default=4, metavar="N",
-        help="Frames per model forward pass (default: 4)",
+        "--device", default="cpu", metavar="DEVICE",
+        help="Torch device for VLM inference, e.g. cuda:0 (default: cpu)",
     )
     p_pre.add_argument(
         "--video", default=None, metavar="NAME",
         help="Restrict to a single video by name, e.g. game_1 or test_3",
     )
     p_pre.add_argument(
-        "--device", default="auto", metavar="DEVICE",
-        help="Device for the VLM: 'auto' (default), 'cuda:0', 'cuda:1', 'cpu'. "
-             "Use a specific index to avoid spreading across multiple GPUs.",
-    )
-    p_pre.add_argument(
         "--override", action="store_true",
-        help="Re-process already-stored frames instead of skipping them.",
+        help="Re-annotate / re-process already-handled videos or frames.",
     )
     p_pre.add_argument(
         "--debug", action="store_true",
-        help="Print the VLM prompt and show each center-cropped image before inference.",
+        help="Show score crops and raw VLM output during processing.",
+    )
+    p_pre.add_argument(
+        "--remove", action="store_true",
+        help="Delete all rows from the scoreboards table and exit.",
     )
 
 
@@ -124,6 +130,7 @@ def _run_dataset(args):
             db=args.db,
             limit=args.limit,
             object_id=args.object_id,
+            frame_stride=args.frame_stride,
             render=args.render,
             render_frames=args.render_frames,
             renderer=args.renderer,
@@ -144,12 +151,12 @@ def _run_dataset(args):
             cfg,
             db=args.db,
             model_id=args.model,
-            frame_stride=args.frame_stride,
-            batch_size=args.batch_size,
-            video=args.video,
             device=args.device,
+            video=args.video,
+            annotate=args.annotate,
             override=args.override,
             debug=args.debug,
+            remove=args.remove,
         )
 
 

@@ -23,6 +23,7 @@ dependencies = [
     "wandb",
     "torch_geometric",
     "gdist",
+    "qwen-vl-utils",
 ]
 
 [project.scripts]

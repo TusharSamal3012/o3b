@@ -16,7 +16,9 @@
 # o3x dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
 # o3x dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
 # o3x dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
-# o3x dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
+
+# o3x dataset preprocess -d opentt --annotate
+# o3x dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0 --override
 
 # Qwen/Qwen3-VL-2B-Instruct
 class_name: OpenTT
@@ -28,11 +30,14 @@ path_raw:        ${path_datasets_raw}/OpenTT
 path_preprocess: ${path_datasets_preprocess}/OpenTT_Preprocess
 
 split: train   # train | test | all
+# note: the test videos do not show the scoreboard with numbers
 
-scene_length: 16   # number of frames per returned Scene clip
+scene_length: 64   # number of frames per returned Scene clip
+# otherwise it is oto fiew 
 
-filter_count_max: 1
+#filter_count_max: 10
+
 
 extra:
-  frame_stride: 4    # step between consecutive frames within a clip (120fps / 4 = 30 effective fps)
-  clip_stride: 64    # step between clip start frames; default = scene_length * frame_stride
+  frame_stride: 16    # step between consecutive frames within a clip (120fps / 4 = 30 effective fps)
+  clip_stride: 512 # 1024    # step between clip start frames; default = scene_length * frame_stride
