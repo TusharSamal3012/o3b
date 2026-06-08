@@ -1,0 +1,2 @@
+from o3b.task.datatypes.object_pair_quant import ObjectPairQuantBatch
+from o3b.task.datatypes.object_pair_qualit import ObjectPairQualitBatch

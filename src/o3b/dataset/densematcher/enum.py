@@ -1,0 +1,28 @@
+from o3b.data.ext_enum import StrEnum
+
+
+class DENSEMATCHER_CATEGORIES(StrEnum):
+    ANIMALS    = "animals"
+    APPLE      = "apple"
+    BACKPACK   = "backpack"
+    BANANA     = "banana"
+    BELL_PEPPER = "bell_pepper"
+    BREAD      = "bread"
+    BROCCOLI   = "broccoli"
+    CARROT     = "carrot"
+    CARS       = "cars"
+    CELERY     = "celery"
+    CHAIRS     = "chairs"
+    CUCUMBER   = "cucumber"
+    EGG        = "egg"
+    EGGPLANT   = "eggplant"
+    KNIFE      = "knife"
+    MUSHROOM   = "mushroom"
+    ONION      = "onion"
+    PEACH      = "peach"
+    PEAR       = "pear"
+    POTATO     = "potato"
+    PUMPKIN    = "pumpkin"
+    SHAMPOO    = "shampoo"
+    TOMATO     = "tomato"
+    ZUCCHINI   = "zucchini"

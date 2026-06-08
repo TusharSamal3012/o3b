@@ -27,8 +27,8 @@ dependencies = [
 ]
 
 [project.scripts]
-o3b          = "od3d_basic.cli:main"
-od3d_dataset = "od3d_basic.dataset.cli:main"
+o3b          = "o3b.cli:main"
+od3d_dataset = "o3b.dataset.cli:main"
 
 [project.optional-dependencies]
 pyrender = ["pyrender2"]
