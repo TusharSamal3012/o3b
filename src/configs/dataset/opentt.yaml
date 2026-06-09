@@ -3,7 +3,7 @@
 # o3b dataset fetch -d opentt
 # o3b dataset index -d opentt
 
-# o3b dataset preprocess -d opentt --annotate
+# o3b dataset preprocess -d opentt --annotate --override
 # o3b dataset preprocess -d opentt --remove # removes previous scores
 # o3b dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0 --override
 
@@ -20,7 +20,7 @@ path_raw:        ${path_datasets_raw}/OpenTT
 path_preprocess: ${path_datasets_preprocess}/OpenTT_Preprocess
 
 
-split: train   # train | test | all
+split: all   # train | test | all
 # note: the test videos do not show the scoreboard with numbers
 # note: actually just in the warmup phase they dont show it
 

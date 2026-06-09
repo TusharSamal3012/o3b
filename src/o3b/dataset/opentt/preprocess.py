@@ -63,6 +63,33 @@ def _migrate_db(con: sqlite3.Connection) -> None:
 
 # ── Phase 1: interactive bbox annotation ──────────────────────────────────────
 
+_BBOX_COLORS = {
+    "scoreboard": (0, 255, 0),
+    "left_score":  (255, 80, 80),
+    "right_score": (80, 80, 255),
+}
+
+
+def _screen_size_2thirds() -> tuple:
+    """Return (width, height) at 2/3 of the primary screen, fallback 1280×720."""
+    try:
+        import tkinter as _tk
+        _root = _tk.Tk()
+        w = int(_root.winfo_screenwidth()  * 2 / 3)
+        h = int(_root.winfo_screenheight() * 2 / 3)
+        _root.destroy()
+        return w, h
+    except Exception:
+        return 1280, 720
+
+
+def _make_win(title: str, win_w: int, win_h: int) -> str:
+    import cv2
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(title, win_w, win_h)
+    return title
+
+
 def annotate_videos(dataset, bboxes_path: Path, *, override: bool = False) -> None:
     """For each video draw scoreboard / left-score / right-score bboxes interactively."""
     bboxes_path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,11 +109,18 @@ def annotate_videos(dataset, bboxes_path: Path, *, override: bool = False) -> No
 
     n_done = 0
     for name, video_path in videos:
-        if not override and name in existing:
-            print(f"  skip  {name}  (already annotated; use --override to redo)")
-            continue
+        if name in existing:
+            if not override:
+                print(f"  skip  {name}  (already annotated; use --override to redo)")
+                continue
+            # With --override: show existing bboxes first and let the user decide
+            n_frames = _video_frame_count(video_path)
+            if not _confirm_reannotate(name, video_path, n_frames, existing[name]):
+                print(f"  keep  {name}  (existing annotation kept)")
+                continue
+        else:
+            n_frames = _video_frame_count(video_path)
 
-        n_frames = _video_frame_count(video_path)
         result = _annotate_video(name, video_path, n_frames)
         if result is None:
             print(f"  skipped {name}")
@@ -101,9 +135,42 @@ def annotate_videos(dataset, bboxes_path: Path, *, override: bool = False) -> No
     print(f"\nAnnotated {n_done} video(s). Bboxes → {bboxes_path}")
 
 
+def _confirm_reannotate(name: str, video_path: Path, n_frames: int, bboxes: dict) -> bool:
+    """Show existing bboxes on the middle frame; return True if the user wants to redo."""
+    import cv2
+
+    win_w, win_h = _screen_size_2thirds()
+
+    frame_idx = n_frames // 2
+    cap = cv2.VideoCapture(str(video_path))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ok, frame_bgr = cap.read()
+    cap.release()
+    if not ok:
+        print(f"  WARNING: could not read frame {frame_idx} from {video_path} — will re-annotate.")
+        return True
+
+    display = frame_bgr.copy()
+    for k, bb in bboxes.items():
+        x1, y1, x2, y2 = bb
+        color = _BBOX_COLORS.get(k, (200, 200, 200))
+        cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(display, k, (x1, max(y1 - 6, 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    win = _make_win(f"{name} — existing bboxes  (R = re-annotate, any other key = keep)", win_w, win_h)
+    print(f"\n  {name}  — showing existing bboxes  (R = re-annotate, any other key = keep)")
+    cv2.imshow(win, display)
+    key = cv2.waitKey(0) & 0xFF
+    cv2.destroyWindow(win)
+    return key in (ord("r"), ord("R"))
+
+
 def _annotate_video(name: str, video_path: Path, n_frames: int) -> Optional[dict]:
     """Show a representative frame; ask the user to draw 3 ROIs. Returns bbox dict or None."""
     import cv2
+
+    win_w, win_h = _screen_size_2thirds()
 
     frame_idx = n_frames // 2
     cap = cv2.VideoCapture(str(video_path))
@@ -117,15 +184,8 @@ def _annotate_video(name: str, video_path: Path, n_frames: int) -> Optional[dict
     print(f"\n  {name}  ({n_frames} frames, showing frame {frame_idx})")
     print("  Drag to draw each box, press SPACE or ENTER to confirm, C to cancel.")
 
-    colors = {
-        "scoreboard": (0, 255, 0),
-        "left_score":  (255, 80, 80),
-        "right_score": (80, 80, 255),
-    }
-
     # ── Step 1: draw scoreboard bbox on the full frame ────────────────────────
-    win = f"{name} - 1/3  whole scoreboard region"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    win = _make_win(f"{name} - 1/3  whole scoreboard region", win_w, win_h)
     roi = cv2.selectROI(win, frame_bgr, showCrosshair=True, fromCenter=False)
     cv2.destroyAllWindows()
 
@@ -150,11 +210,10 @@ def _annotate_video(name: str, video_path: Path, n_frames: int) -> Optional[dict
         display = sb_crop.copy()
         for k, bb in rel_bboxes.items():
             x1, y1, x2, y2 = bb
-            cv2.rectangle(display, (x1, y1), (x2, y2), colors[k], 2)
-            cv2.putText(display, k, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[k], 2)
+            cv2.rectangle(display, (x1, y1), (x2, y2), _BBOX_COLORS[k], 2)
+            cv2.putText(display, k, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, _BBOX_COLORS[k], 2)
 
-        win = f"{name} - {label}"
-        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        win = _make_win(f"{name} - {label}", win_w, win_h)
         roi = cv2.selectROI(win, display, showCrosshair=True, fromCenter=False)
         cv2.destroyAllWindows()
 
@@ -176,10 +235,9 @@ def _annotate_video(name: str, video_path: Path, n_frames: int) -> Optional[dict
     display = frame_bgr.copy()
     for k, bb in bboxes.items():
         x1, y1, x2, y2 = bb
-        cv2.rectangle(display, (x1, y1), (x2, y2), colors[k], 2)
-        cv2.putText(display, k, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[k], 2)
-    win = f"{name} - confirm? (any key = accept, Q = redo)"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        cv2.rectangle(display, (x1, y1), (x2, y2), _BBOX_COLORS[k], 2)
+        cv2.putText(display, k, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, _BBOX_COLORS[k], 2)
+    win = _make_win(f"{name} - confirm? (any key = accept, Q = redo)", win_w, win_h)
     cv2.imshow(win, display)
     key = cv2.waitKey(0) & 0xFF
     cv2.destroyAllWindows()
