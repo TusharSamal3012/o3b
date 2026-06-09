@@ -59,6 +59,7 @@ class DatasetConfig:
     filter_count_max:  Optional[int]         = None   # None = all; max number of samples to load
     filter_has_kpts:   bool                  = False
     filter_is_real:    bool                  = False
+    filter_score_zero: bool                  = False  # OpenTT: drop clips where both scores == 0
     # dataset-wide rigid transform applied to every loaded object (4x4, R|t convention)
     obj_tform4x4:      Optional[list]        = None   # [[r00,r01,r02,tx],[...],[...],[0,0,0,1]]
 
@@ -83,8 +84,9 @@ class DatasetConfig:
             "categories":        self.categories,
             "subsets":           self.subsets,
             "filter_count_max":  self.filter_count_max,
-            "filter_has_kpts":   self.filter_has_kpts,
-            "filter_is_real":    self.filter_is_real,
+            "filter_has_kpts":    self.filter_has_kpts,
+            "filter_is_real":     self.filter_is_real,
+            "filter_score_zero":  self.filter_score_zero,
             "obj_tform4x4":      self.obj_tform4x4,
             "extra":           self.extra,
         }
@@ -107,8 +109,9 @@ class DatasetConfig:
             categories       = d.get("categories"),
             subsets          = d.get("subsets"),
             filter_count_max = d.get("filter_count_max") or d.get("max_samples"),
-            filter_has_kpts  = bool(d.get("filter_has_kpts", False)),
-            filter_is_real   = bool(d.get("filter_is_real",  False)),
+            filter_has_kpts   = bool(d.get("filter_has_kpts",   False)),
+            filter_is_real    = bool(d.get("filter_is_real",    False)),
+            filter_score_zero = bool(d.get("filter_score_zero", False)),
             obj_tform4x4     = d.get("obj_tform4x4"),
             extra           = d.get("extra", {}),
         )
@@ -137,9 +140,10 @@ def _load_yaml_with_defaults(path: Path, overrides: "list[str] | None" = None) -
 _REGISTRY_DATASETS: dict[str, type["ConfigurableDataset"]] = {}
 
 _CLASS_TO_MODULE: dict[str, str] = {
-    "HouseCorr3D":  "o3b.dataset.housecorr3d.dataset",
-    "DenseMatcher": "o3b.dataset.densematcher.dataset",
-    "OpenTT":       "o3b.dataset.opentt.dataset",
+    "HouseCorr3D":      "o3b.dataset.housecorr3d.dataset",
+    "HouseCorr3DFrame": "o3b.dataset.housecorr3d.frame_dataset",
+    "DenseMatcher":     "o3b.dataset.densematcher.dataset",
+    "OpenTT":           "o3b.dataset.opentt.dataset",
 }
 
 

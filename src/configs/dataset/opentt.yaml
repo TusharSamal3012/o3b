@@ -2,23 +2,13 @@
 #
 # o3b dataset fetch -d opentt
 # o3b dataset index -d opentt
-# o3b dataset viz   -d opentt
-#
-# On a remote platform:
-# o3b dataset fetch -d opentt -p slurm
-# o3b dataset index -d opentt -p slurm
-# o3b dataset viz   -d opentt -p slurm
-
-# o3b dataset preprocess -d opentt
-# o3b dataset preprocess -d opentt --model Qwen/Qwen2-VL-2B-Instruct --device cuda:0
-# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-4B --device cuda:0
-# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-2B --device cuda:0
-# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
-# o3b dataset preprocess -d opentt --model Qwen/Qwen3.5-0.8B --device cuda:0
-# o3b dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0
 
 # o3b dataset preprocess -d opentt --annotate
+# o3b dataset preprocess -d opentt --remove # removes previous scores
 # o3b dataset preprocess -d opentt --model Qwen/Qwen3-VL-2B-Instruct --device cuda:0 --override
+
+# o3b dataset viz   -d opentt
+# o3b dataset viz   -d opentt --frames-per-scene 2
 
 # Qwen/Qwen3-VL-2B-Instruct
 class_name: OpenTT
@@ -29,14 +19,16 @@ path_datasets_preprocess: /data/lmbraid19/sommerl/datasets
 path_raw:        ${path_datasets_raw}/OpenTT
 path_preprocess: ${path_datasets_preprocess}/OpenTT_Preprocess
 
+
 split: train   # train | test | all
 # note: the test videos do not show the scoreboard with numbers
+# note: actually just in the warmup phase they dont show it
 
 scene_length: 64   # number of frames per returned Scene clip
 # otherwise it is oto fiew 
 
-#filter_count_max: 10
-
+#filter_count_max: 20
+#filter_score_zero: true # drop clips whose middle frame has a known scoreboard with both scores == 0
 
 extra:
   frame_stride: 16    # step between consecutive frames within a clip (120fps / 4 = 30 effective fps)

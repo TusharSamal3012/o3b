@@ -126,6 +126,17 @@ class OpenTT(ConfigurableDataset):
             self._path_preprocess / "scoreboards.db"
         )
 
+        if (self.cfg.filter_score_zero or self.cfg.extra.get("filter_score_zero")) and self._scoreboards:
+            before = len(self._clips)
+            self._clips = [
+                c for c in self._clips
+                if not _clip_has_zero_score(c, self._scoreboards)
+            ]
+            print(
+                f"filter_score_zero: dropped {before - len(self._clips)} clips "
+                f"({len(self._clips)} remaining)"
+            )
+
     def _ingest_split(
         self,
         split: str,
@@ -356,15 +367,20 @@ class OpenTT(ConfigurableDataset):
         limit: int = 4,
         object_id: Optional[str] = None,
         frame_stride: Optional[int] = None,
+        frames_per_scene: Optional[int] = None,
         render: bool = False,
         render_frames: int = 0,
         renderer: str = "pyrender",
         debug: bool = False,
     ) -> None:
-        """Show up to *limit* scenes using Scene.viz().
+        """Load and play up to *limit* clips, one at a time.
 
-        *object_id* can be used to restrict display to clips from a specific video
+        Each clip's frames are decoded upfront, then shown in an OpenCV
+        player.  *object_id* restricts clips to a specific video name
         (e.g. --object-id game_1).
+
+        When *frames_per_scene* is set, only that many evenly-sampled frames
+        are loaded and shown as a static grid — no interactive player.
         """
         dataset = cls(cfg)
 
@@ -388,142 +404,261 @@ class OpenTT(ConfigurableDataset):
                 )
                 return
 
-        # Collect unique videos in order of first appearance
-        seen: set[str] = set()
-        videos: list[tuple[str, Path]] = []
-        for c in clips:
-            if c["name"] not in seen:
-                seen.add(c["name"])
-                videos.append((c["name"], c["path"]))
-
-        n = min(limit, len(videos))
+        clips = clips[:limit]
         print(
-            f"Visualising {n} / {len(videos)} video(s)"
+            f"Visualising {len(clips)} clip(s)"
             + (f" (filtered to '{object_id}')" if object_id else "")
             + f"  [{dataset._path_raw}]"
         )
 
         ds_frame_stride = int(cfg.extra.get("frame_stride", 1))
-        ds_scene_length = cfg.scene_length
-        if frame_stride is None:
-            frame_stride = ds_frame_stride
+        for clip_idx, clip in enumerate(clips):
+            name    = clip["name"]
+            indices = clip["indices"]
+            anno    = dataset._annotations.get(name, {})
 
-        for name, video_path in videos[:n]:
-            _viz_video_interactive(
-                name, video_path, dataset._scoreboards,
-                frame_stride=frame_stride,
-                ds_frame_stride=ds_frame_stride,
-                ds_scene_length=ds_scene_length,
-            )
+            # Sub-sample indices when --frames-per-scene is set
+            if frames_per_scene is not None and frames_per_scene < len(indices):
+                step     = max(1, (len(indices) - 1) // (frames_per_scene - 1)) if frames_per_scene > 1 else len(indices)
+                sampled  = [indices[min(i * step, len(indices) - 1)] for i in range(frames_per_scene)]
+                # remove duplicates while preserving order
+                seen: set = set()
+                sampled = [fi for fi in sampled if not (fi in seen or seen.add(fi))]  # type: ignore[func-returns-value]
+            else:
+                sampled = indices
+
+            print(f"\n[{clip_idx + 1}/{len(clips)}]  {name}  frames {indices[0]}–{indices[-1]}")
+            print(f"  Decoding {len(sampled)} frame(s)…", end=" ", flush=True)
+            rgbs = _extract_frames(clip["path"], sampled)
+            if rgbs is None:
+                print("failed — skipping.")
+                continue
+            print("done")
+
+            events      = [anno.get(fi) for fi in sampled]
+            scoreboards = [
+                _nearest_scoreboard(dataset._scoreboards, name, fi)
+                for fi in sampled
+            ] if dataset._scoreboards else [None] * len(sampled)
+
+            if frames_per_scene is not None:
+                _viz_grid(
+                    scene_id      = f"{name}_{indices[0]:07d}",
+                    rgbs          = rgbs,
+                    events        = events,
+                    scoreboards   = scoreboards,
+                    frame_indices = sampled,
+                    video_fps     = 120.0,
+                )
+            else:
+                _viz_scene(
+                    scene_id    = f"{name}_{indices[0]:07d}",
+                    rgbs        = rgbs,
+                    events      = events,
+                    scoreboards = scoreboards,
+                    fps         = max(1.0, 120.0 / ds_frame_stride),
+                )
 
 
-# ── interactive viewer ────────────────────────────────────────────────────────
+# ── viewers ───────────────────────────────────────────────────────────────────
 
-def _viz_video_interactive(
-    video_name: str,
-    video_path: Path,
-    scoreboards: dict,
-    *,
-    frame_stride: int = 1,
-    ds_frame_stride: int = 1,
-    ds_scene_length: int = 1,
+def _viz_grid(
+    scene_id: str,
+    rgbs: "torch.Tensor",
+    events: list,
+    scoreboards: list,
+    frame_indices: "list[int] | None" = None,
+    video_fps: float = 1.0,
 ) -> None:
-    """Show a full video with frame-scrubbing and stride trackbars, and score overlay.
+    """Show a static grid of frames (one tile per frame).
+
+    Tile size is derived from the screen so the window fills 2/3 of the
+    display without upscaling (pixels are never invented).
+
+    Controls:  any key → next clip   Q / Esc → quit all
+    """
+    import math
+    import cv2
+    import numpy as np
+
+    T = rgbs.shape[0]
+    if T == 0:
+        return
+
+    cols = math.ceil(math.sqrt(T))
+    rows = math.ceil(T / cols)
+
+    # Determine available display area (2/3 of screen, fall back to 1280×720)
+    disp_w, disp_h = 1280, 720
+    try:
+        import tkinter as _tk
+        _root = _tk.Tk()
+        disp_w = int(_root.winfo_screenwidth()  * 2 / 3)
+        disp_h = int(_root.winfo_screenheight() * 2 / 3)
+        _root.destroy()
+    except Exception:
+        pass
+
+    # Tile dimensions: fit the grid into the display area, never upscale
+    orig_h, orig_w = rgbs.shape[1], rgbs.shape[2]
+    tile_w = min(orig_w, disp_w // cols)
+    tile_h = min(orig_h, disp_h // rows)
+    # Preserve aspect ratio: scale by the more constraining dimension
+    scale  = min(tile_w / orig_w, tile_h / orig_h)
+    tile_w = int(orig_w * scale)
+    tile_h = int(orig_h * scale)
+
+    font  = cv2.FONT_HERSHEY_SIMPLEX
+    tiles = []
+    for t in range(T):
+        frame_rgb = (rgbs[t].clamp(0, 1).numpy() * 255).astype(np.uint8)
+        tile      = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        if (tile_w, tile_h) != (orig_w, orig_h):
+            tile = cv2.resize(tile, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+        tw, th = tile_w, tile_h
+
+        fscale    = max(tw, th) / 700.0
+        thickness = max(1, round(fscale * 2))
+        margin    = max(4, int(tw * 0.015))
+        y_pos     = max(16, int(th * 0.07))
+
+        def _put(text: str, x: int, y: int, color: tuple, _tile: "np.ndarray" = tile) -> None:
+            cv2.putText(_tile, text, (x, y), font, fscale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+            cv2.putText(_tile, text, (x, y), font, fscale, color,     thickness,     cv2.LINE_AA)
+
+        sb          = scoreboards[t] if scoreboards[t] is not None else {}
+        left_score  = sb.get("score_left_point")  if sb else None
+        right_score = sb.get("score_right_point") if sb else None
+        l_str = str(left_score)  if left_score  is not None else "?"
+        r_str = str(right_score) if right_score is not None else "?"
+
+        _put(f"L:{l_str}", margin, y_pos, (80, 220, 80))
+        r_label_w = cv2.getTextSize(f"R:{r_str}", font, fscale, thickness)[0][0]
+        _put(f"R:{r_str}", tw - r_label_w - margin, y_pos, (80, 80, 220))
+
+        ev = events[t]
+        if ev:
+            ev_tw = cv2.getTextSize(ev, font, fscale * 0.65, thickness)[0][0]
+            cv2.putText(tile, ev, ((tw - ev_tw) // 2, th - margin),
+                        font, fscale * 0.65, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+            cv2.putText(tile, ev, ((tw - ev_tw) // 2, th - margin),
+                        font, fscale * 0.65, (220, 220, 80), thickness, cv2.LINE_AA)
+
+        if frame_indices is not None:
+            secs   = frame_indices[t] / video_fps
+            fi_str = f"{int(secs // 60)}:{secs % 60:05.2f}"
+            _put(fi_str, margin, th - margin, (200, 200, 200))
+
+        tiles.append(tile)
+
+    # Pad to fill the grid
+    blank = np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
+    while len(tiles) < rows * cols:
+        tiles.append(blank)
+
+    grid_rows = [np.hstack(tiles[r * cols:(r + 1) * cols]) for r in range(rows)]
+    grid      = np.vstack(grid_rows)
+
+    win = scene_id
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win, disp_w, disp_h)
+    cv2.setWindowTitle(win, f"{scene_id}  ({T} frames)  —  any key: next   Q/Esc: quit")
+    cv2.imshow(win, grid)
+    print(f"  {scene_id}  ({T} frames)  —  any key: next clip   Q/Esc: quit")
+    key = cv2.waitKey(0) & 0xFF
+    cv2.destroyWindow(win)
+    if key in (27, ord('q'), ord('Q')):
+        sys.exit(0)
+
+
+def _viz_scene(
+    scene_id: str,
+    rgbs: "torch.Tensor",
+    events: list,
+    scoreboards: list,
+    fps: float = 30.0,
+) -> None:
+    """Play a single pre-loaded clip in an OpenCV window.
 
     Controls:
       Space       play / pause
-      ← / →       jump by current stride
-      Q / Esc     close and move to next video
+      ← / →  or  A / D    step one frame
+      Q / Esc              close and move to next clip
     """
     import cv2
+    import numpy as np
 
-    cap = cv2.VideoCapture(str(video_path))
-    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-    if n_frames == 0:
-        cap.release()
+    T = rgbs.shape[0]
+    if T == 0:
         return
 
-    max_stride = max(1, n_frames // 10)
-
-    win = video_name
+    win = scene_id
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
-    current  = [0]
-    playing  = [False]
-    prev_idx = [-1]
-    stride   = [max(1, min(frame_stride, max_stride))]
+    current = [0]
+    playing = [False]
 
-    def on_frame(pos: int)  -> None: current[0] = pos
-    def on_stride(pos: int) -> None: stride[0]  = max(1, pos)
+    def on_frame(pos: int) -> None:
+        current[0] = pos
 
-    cv2.createTrackbar("Frame",  win, 0,                       max(n_frames - 1, 1), on_frame)
-    cv2.createTrackbar("Stride", win, stride[0], max_stride,   on_stride)
-
+    cv2.createTrackbar("Frame", win, 0, max(T - 1, 1), on_frame)
     print(
-        f"  {video_name}  ({n_frames} frames @ {fps:.0f} fps)  —  "
-        "Space: play/pause   ←→: jump by stride   Q/Esc: next video"
+        f"  {scene_id}  ({T} frames @ {fps:.0f} fps)  —  "
+        "Space: play/pause   ←→/AD: step   Q/Esc: next clip"
     )
 
-    frame_bgr = None
+    font      = None   # resolved on first frame
+    scale     = None
+    thickness = None
+    margin    = None
+    y_pos     = None
+    line_h    = None
 
     while True:
-        idx = current[0]
+        t = current[0]
 
-        if idx != prev_idx[0]:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ok, frame_bgr = cap.read()
-            if not ok:
-                break
-            prev_idx[0] = idx
+        # Convert (H, W, 3) float32 → uint8 BGR
+        frame_rgb = (rgbs[t].clamp(0, 1).numpy() * 255).astype(np.uint8)
+        display   = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        H, W      = display.shape[:2]
 
-        display = frame_bgr.copy()
-        H, W    = display.shape[:2]
-
-        sb          = _nearest_scoreboard(scoreboards, video_name, idx) if scoreboards else None
-        left_score  = sb.get("score_left_point")  if sb else None
-        right_score = sb.get("score_right_point") if sb else None
-
-        l_str = str(left_score)  if left_score  is not None else "?"
-        r_str = str(right_score) if right_score is not None else "?"
-        ts    = f"{idx / fps:.1f}s"
-
-        cv2.setWindowTitle(
-            win,
-            f"{video_name}  |  {ts}  (frame {idx} @ {fps:.0f} fps, stride {stride[0]})  |  L: {l_str}   R: {r_str}",
-        )
-
-        # On-frame text overlay
-        font      = cv2.FONT_HERSHEY_SIMPLEX
-        scale     = max(W, H) / 700.0
-        thickness = max(1, round(scale * 2))
-        margin    = max(8, int(W * 0.015))
-        y_pos     = max(20, int(H * 0.06))
-
-        line_h = int(y_pos * 1.4)
+        # Lazily compute text metrics on first frame
+        if font is None:
+            font      = cv2.FONT_HERSHEY_SIMPLEX
+            scale     = max(W, H) / 700.0
+            thickness = max(1, round(scale * 2))
+            margin    = max(8, int(W * 0.015))
+            y_pos     = max(20, int(H * 0.06))
+            line_h    = int(y_pos * 1.4)
 
         def _put(text: str, x: int, y: int, color: tuple) -> None:
             cv2.putText(display, text, (x, y), font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
             cv2.putText(display, text, (x, y), font, scale, color,     thickness,     cv2.LINE_AA)
 
+        # Scoreboard overlay
+        sb          = scoreboards[t] if scoreboards[t] is not None else {}
+        left_score  = sb.get("score_left_point")  if sb else None
+        right_score = sb.get("score_right_point") if sb else None
+        l_str = str(left_score)  if left_score  is not None else "?"
+        r_str = str(right_score) if right_score is not None else "?"
+
         _put(f"L: {l_str}", margin, y_pos, (80, 220, 80))
         r_tw = cv2.getTextSize(f"R: {r_str}", font, scale, thickness)[0][0]
         _put(f"R: {r_str}", W - r_tw - margin, y_pos, (80, 80, 220))
 
-        # Scene label — second row, centre
-        scene_span = ds_frame_stride * ds_scene_length
-        scene_idx  = idx // scene_span
-        frame_pos  = (idx % scene_span) // ds_frame_stride
-        if (idx % scene_span) % ds_frame_stride == 0:
-            scene_txt = f"scene {scene_idx}  [{frame_pos + 1}/{ds_scene_length}]"
-        else:
-            scene_txt = f"scene {scene_idx}  (gap)"
-        sc_tw = cv2.getTextSize(scene_txt, font, scale, thickness)[0][0]
-        _put(scene_txt, (W - sc_tw) // 2, y_pos + line_h, (220, 220, 80))
+        # Event label centred on second row
+        ev  = events[t]
+        ev_str = ev if ev is not None else ""
+        if ev_str:
+            ev_tw = cv2.getTextSize(ev_str, font, scale * 0.75, thickness)[0][0]
+            cv2.putText(display, ev_str, ((W - ev_tw) // 2, y_pos + line_h),
+                        font, scale * 0.75, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+            cv2.putText(display, ev_str, ((W - ev_tw) // 2, y_pos + line_h),
+                        font, scale * 0.75, (220, 220, 80), thickness, cv2.LINE_AA)
 
+        cv2.setWindowTitle(win, f"{scene_id}  |  frame {t + 1}/{T}  |  L:{l_str}  R:{r_str}")
         cv2.imshow(win, display)
-        cv2.setTrackbarPos("Frame", win, idx)
+        cv2.setTrackbarPos("Frame", win, t)
 
         delay = max(1, int(1000 / fps)) if playing[0] else 30
         key   = cv2.waitKey(delay) & 0xFF
@@ -532,20 +667,19 @@ def _viz_video_interactive(
             break
         elif key == ord(' '):
             playing[0] = not playing[0]
-        elif key in (83, 3, ord('d')):          # → or d
+        elif key in (83, 3, ord('d'), ord('D')):    # → or D
             playing[0] = False
-            current[0] = min(idx + stride[0], n_frames - 1)
-        elif key in (81, 2, ord('a')):          # ← or a
+            current[0] = min(t + 1, T - 1)
+        elif key in (81, 2, ord('a'), ord('A')):    # ← or A
             playing[0] = False
-            current[0] = max(idx - stride[0], 0)
+            current[0] = max(t - 1, 0)
         elif playing[0]:
-            nxt = idx + 1
-            if nxt >= n_frames:
+            nxt = t + 1
+            if nxt >= T:
                 playing[0] = False
             else:
                 current[0] = nxt
 
-    cap.release()
     cv2.destroyWindow(win)
 
 
@@ -690,6 +824,18 @@ def _nearest_scoreboard(
     if abs(nearest - fi) <= max_dist:
         return frame_dict[nearest]
     return None
+
+
+def _clip_has_zero_score(clip: dict, scoreboards: dict) -> bool:
+    """Return True if the clip's middle frame has a known scoreboard with both scores == 0."""
+    indices = clip["indices"]
+    mid_fi  = indices[len(indices) // 2]
+    sb = _nearest_scoreboard(scoreboards, clip["name"], mid_fi)
+    if sb is None:
+        return False
+    left  = sb.get("score_left_point")  if sb.get("score_left_point")  is not None else sb.get("score_left")
+    right = sb.get("score_right_point") if sb.get("score_right_point") is not None else sb.get("score_right")
+    return left == 0 and right == 0
 
 
 def _progress(block_num: int, block_size: int, total_size: int) -> None:

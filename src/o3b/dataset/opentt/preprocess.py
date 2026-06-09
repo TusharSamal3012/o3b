@@ -24,7 +24,7 @@ from typing import Optional
 
 import torch
 from PIL import Image
-
+import numpy as np
 BBOXES_FILENAME = "video_bboxes.json"
 
 
@@ -417,6 +417,8 @@ def postprocess_scores(db_path: Path) -> None:
     """Enforce score monotonicity per video.
 
     A score is valid only if it equals the previous score or previous score + 1.
+    Exception: if one player reached ≥ 11 points (game over), both scores may
+    reset to 0 (start of the next game).
     Invalid (or None) scores are replaced with the previous valid score.
     """
     if not db_path.exists():
@@ -434,24 +436,31 @@ def postprocess_scores(db_path: Path) -> None:
         updates: list = []
 
         for video_name, frame_idx, left, right in rows:
+            
+            new_left = left
+            new_right = right
+
             # Clamp out-of-range readings to 0 before monotonicity check
-            if left  is not None and not (0 <= left  <= 11):
-                left  = 0
-            if right is not None and not (0 <= right <= 11):
-                right = 0
+            if left is not None and ((not (0 <= left  <= 11)) and (not (0 <= left  <= right+2))):
+                new_left  = 0
+                print(left, right)
+            if right is not None and ((not (0 <= right <= 11)) and (not (0 <= right <= left+2))):
+                new_right = 0
+                print(left, right)
 
             p_left, p_right = prev.get(video_name, (None, None))
-
-            new_left = left
-            if p_left is not None:
-                if left is None or (left != p_left and left != p_left + 1):
-                    new_left = p_left
-
-            new_right = right
-            if p_right is not None:
-                if right is None or (right != p_right and right != p_right + 1):
-                    new_right = p_right
-
+            
+            # A game reset is valid when the previous state had a winner (≥ 11)
+            game_reset = (
+                p_left is not None and p_right is not None
+                and left is not None and right is not None
+                and max(p_left, p_right) >= 11 and np.abs(p_left - p_right) >=2 and left == 0 and right == 0
+            )
+            
+            if game_reset:
+                new_left = 0  # valid game-reset
+                new_right = 0  # valid game-reset
+            
             if new_left != left or new_right != right:
                 updates.append((new_left, new_right, new_left, new_right, video_name, frame_idx))
 

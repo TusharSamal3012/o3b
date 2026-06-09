@@ -1,23 +1,26 @@
+# o3b dataset fetch -d hc3d_frame
+# o3b dataset index -d hc3d_frame
+# o3b dataset viz   -d hc3d_frame
+
 defaults:
   - hc3d
   - _self_
 
-item_type: frame # frame, object, scene, frame_object, scene_object
+class_name: HouseCorr3DFrame
 
-frame_modalities:
+item_type: frame_object
+
+# split: "train" | "test" | "all"
+split: train
+
+# filter_is_real: false → synthetic only | true → real only
+filter_is_real: false
+
+modalities:
   - rgb
-  #- obj_ncds0c_tform4x4_obj
-  #- obj_kpts3d
-  #- category
+  - cam_intr4x4
+  - cam_tform4x4_obj
+  - category
 
-#mesh_type: "mc16_vuni4_r256_fdinov2s"
-
-# o3b dataset fetch -d hc3d_object  
-# o3b dataset index -d hc3d_object
-# o3b dataset viz -d hc3d_object
-
-# split: train
-
-# o3b dataset fetch -d hc3d_object -p slurm  
-# o3b dataset index -d hc3d_object -p slurm
-# o3b dataset viz -d hc3d_object -p slurm
+filter_count_max:
+categories:

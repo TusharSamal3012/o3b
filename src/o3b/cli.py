@@ -56,6 +56,10 @@ def _build_dataset_parser(sub):
         help="Initial ←/→ jump size in frames (default: frame_stride from dataset config); "
              "can also be changed via the Stride trackbar",
     )
+    p_vis.add_argument(
+        "--frames-per-scene", type=int, default=None, metavar="N",
+        help="Show a static grid of N evenly-sampled frames per clip instead of the interactive player",
+    )
     p_vis.add_argument("--filter-has-kpts", action="store_true")
     p_vis.add_argument("--render", action="store_true")
     p_vis.add_argument("--render-frames", type=int, default=4, metavar="N")
@@ -131,6 +135,7 @@ def _run_dataset(args):
             limit=args.limit,
             object_id=args.object_id,
             frame_stride=args.frame_stride,
+            frames_per_scene=args.frames_per_scene,
             render=args.render,
             render_frames=args.render_frames,
             renderer=args.renderer,
