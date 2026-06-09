@@ -47,6 +47,11 @@ def _build_dataset_parser(sub):
     p_index.add_argument("--db", type=Path, default=None, metavar="FILE")
     p_index.add_argument("--remove", action="store_true",
                          help="Delete any existing index for this dataset before indexing")
+    p_index.add_argument(
+        "--max", type=int, default=None, metavar="N", dest="max_index",
+        help="Stop after indexing N total rows (for quick testing). "
+             "filter_count_max in the config applies at query time only.",
+    )
 
     p_vis = ds_sub.add_parser("viz", help="Summarize and optionally render dataset objects")
     _add_config(p_vis)
@@ -127,7 +132,7 @@ def _run_dataset(args):
     if args.dataset_command == "fetch":
         cls.fetch(cfg, url=args.url)
     elif args.dataset_command == "index":
-        cls.index(cfg, db=args.db, remove=args.remove)
+        cls.index(cfg, db=args.db, remove=args.remove, max_index=getattr(args, "max_index", None))
     elif args.dataset_command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True
@@ -914,13 +919,14 @@ def _resolve_bench_config(name_or_path: str) -> Path:
     if p.exists():
         return p.resolve()
     stem = name_or_path if not name_or_path.endswith(".yaml") else name_or_path[:-5]
-    for subdir in ("src/configs/eval", "src/configs"):
+    for subdir in ("src/configs/bench", "src/configs/eval", "src/configs"):
         candidate = Path.cwd() / subdir / f"{stem}.yaml"
         if candidate.exists():
             return candidate
     raise argparse.ArgumentTypeError(
         f"Benchmark config not found: {name_or_path!r}\n"
         f"  Tried: {p.resolve()}\n"
+        f"  Tried: {Path.cwd() / 'src/configs/bench' / (stem + '.yaml')}\n"
         f"  Tried: {Path.cwd() / 'src/configs/eval' / (stem + '.yaml')}\n"
         f"  Tried: {Path.cwd() / 'src/configs' / (stem + '.yaml')}"
     )
@@ -967,7 +973,7 @@ def _build_bench_parser(sub):
     def _add_bench_args(q):
         q.add_argument(
             "-b", "--benchmark", required=True, type=_resolve_bench_config, metavar="BENCHMARK",
-            help="Benchmark config name (resolved from src/configs/eval/) or full path to YAML",
+            help="Benchmark config name (resolved from src/configs/bench/) or full path to YAML",
         )
         q.add_argument(
             "-p", "--platform", default=None, metavar="PLATFORM",

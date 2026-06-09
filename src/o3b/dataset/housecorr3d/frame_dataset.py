@@ -71,10 +71,11 @@ class HouseCorr3DFrame(ConfigurableDataset):
             cur = con.cursor()
             self._frame_rows = [dict(r) for r in cur.execute("SELECT * FROM frames").fetchall()]
 
-            split     = self.cfg.split or "train"
-            is_real   = self.cfg.filter_is_real
-            cats      = self.cfg.categories
-            limit     = self.cfg.filter_count_max
+            split      = self.cfg.split or "train"
+            is_real    = self.cfg.filter_is_real
+            cats       = self.cfg.categories
+            limit      = self.cfg.filter_count_max
+            has_kpts   = self.cfg.filter_has_kpts
 
             split_clause = "" if split == "all" else f" AND split = '{split}'"
             if is_real is None:
@@ -83,6 +84,7 @@ class HouseCorr3DFrame(ConfigurableDataset):
                 real_clause = " AND data_type = 'real'"
             else:
                 real_clause = " AND data_type = 'synthetic'"
+            kpts_clause  = " AND has_kpts = 1" if has_kpts else ""
             limit_clause = f" LIMIT {limit}" if limit else ""
 
             if cats:
@@ -94,7 +96,7 @@ class HouseCorr3DFrame(ConfigurableDataset):
 
             rows = cur.execute(
                 f"SELECT rowid FROM frames"
-                f" WHERE is_valid = 1{split_clause}{real_clause}{cat_clause}{limit_clause}",
+                f" WHERE is_valid = 1{split_clause}{real_clause}{kpts_clause}{cat_clause}{limit_clause}",
                 params,
             ).fetchall()
             # rowid is 1-based; our list is 0-based
@@ -139,6 +141,33 @@ class HouseCorr3DFrame(ConfigurableDataset):
                 json.loads(row["cam_tform4x4_obj"]), dtype=torch.float32
             )
 
+        # cam_bbox2d: derive from fo_mask (xyxy pixel bbox)
+        cam_bbox2d = None
+        if _want("cam_bbox2d") and mask is not None:
+            from o3b.cv.visual.draw import get_bboxs_from_masks
+            cam_bbox2d = get_bboxs_from_masks(mask[None])[0].float()  # (4,) xyxy
+
+        # cam_bbox3d: stored as (3,) obj-space side lengths for use with draw_bbox3d
+        cam_bbox3d = None
+        if _want("cam_bbox3d") and row.get("obj_size3d"):
+            cam_bbox3d = torch.tensor(json.loads(row["obj_size3d"]), dtype=torch.float32)
+
+        # obj_kpts3d / obj_kpts3d_mask: load from preprocess dir, scale mesh-units → metres
+        obj_kpts3d      = None
+        obj_kpts3d_mask = None
+        if _want("obj_kpts3d"):
+            oid        = row.get("object_id", "")
+            kpts_path  = self._path_preprocess(self.cfg) / "obj_kpts3d" / oid / "kpts3d.pt"
+            if kpts_path.exists():
+                try:
+                    data      = torch.load(kpts_path, weights_only=True)  # (K, 4)
+                    obj_scale = float(row.get("obj_scale") or 1.0)
+                    obj_kpts3d = data[:, :3] * obj_scale               # (K, 3) in metres
+                    if _want("obj_kpts3d_mask"):
+                        obj_kpts3d_mask = data[:, 3] > 0.5             # (K,) bool
+                except Exception:
+                    pass
+
         category    = row.get("category") if _want("category") else None
         object_id   = row.get("object_id", "")
         frame_id    = row.get("frame_id", "")
@@ -153,6 +182,10 @@ class HouseCorr3DFrame(ConfigurableDataset):
             fo_mask          = mask,
             cam_intr4x4      = cam_intr4x4,
             cam_tform4x4_obj = cam_tform4x4_obj,
+            cam_bbox2d       = cam_bbox2d,
+            cam_bbox3d       = cam_bbox3d,
+            obj_kpts3d       = obj_kpts3d,
+            obj_kpts3d_mask  = obj_kpts3d_mask,
             category         = category,
         )
 
@@ -170,18 +203,24 @@ class HouseCorr3DFrame(ConfigurableDataset):
         *,
         db: Optional[Path] = None,
         remove: bool = False,
+        max_index: Optional[int] = None,
     ) -> None:
         path_raw        = cls._path_raw(cfg)
         path_preprocess = cls._path_preprocess(cfg)
         db_path         = db or path_preprocess / "frames.db"
-        limit     = cfg.filter_count_max  # None = no limit
-        is_real   = cfg.filter_is_real    # None = both, True = real only, False = synthetic only
+        # filter_count_max stops indexing once this many filter-matching rows are found.
+        # --max (max_index) is an unconditional override (for quick testing without a yaml edit).
+        limit       = max_index or cfg.filter_count_max  # None = index everything
+        filter_kpts = cfg.filter_has_kpts                # only count kpts rows toward limit
+        is_real     = cfg.filter_is_real                 # None = both, True = real only, False = synthetic
+        kpts_preprocess = path_preprocess / "obj_kpts3d"
 
         print(f"path_raw        : {path_raw}")
         print(f"path_preprocess : {path_preprocess}")
         print(f"db              : {db_path}")
         if limit:
-            print(f"filter_count_max: {limit}  (indexing stops after this many rows)")
+            kpts_note = " (kpts rows only)" if filter_kpts else ""
+            print(f"filter_count_max: {limit}{kpts_note}  — indexing stops after this many matching rows")
         if is_real is not None:
             print(f"filter_is_real  : {is_real}  ({'real (ROPE) only' if is_real else 'synthetic (SOPE) only'})")
 
@@ -223,14 +262,35 @@ class HouseCorr3DFrame(ConfigurableDataset):
                 mask_path        TEXT,
                 cam_intr4x4      TEXT,
                 cam_tform4x4_obj TEXT,
+                obj_size3d       TEXT,
+                obj_scale        REAL,
+                has_kpts         INTEGER DEFAULT 0,
                 is_valid         INTEGER DEFAULT 1
             )
         """)
 
         from tqdm import tqdm
 
-        total = 0
+        COMMIT_EVERY = 50  # flush to disk every N scenes
+        total_rows   = 0   # all rows inserted
+        matched      = 0   # rows matching the index-time filter (used for limit check)
+        scenes_since_commit = 0
         done  = False
+
+        def _remaining():
+            """Remaining matching rows allowed in the current scene."""
+            return (limit - matched) if limit else None
+
+        def _update(n_total: int, n_match: int) -> bool:
+            """Update counters; return True when the limit has been reached."""
+            nonlocal total_rows, matched, scenes_since_commit
+            total_rows += n_total
+            matched    += n_match
+            scenes_since_commit += 1
+            if scenes_since_commit >= COMMIT_EVERY:
+                con.commit()
+                scenes_since_commit = 0
+            return bool(limit and matched >= limit)
 
         # ── real data: ROPE (always test split) ───────────────────────────────
         if rope_root.exists() and not done and is_real is not False:
@@ -238,18 +298,19 @@ class HouseCorr3DFrame(ConfigurableDataset):
             print(f"\nIndexing ROPE ({len(scene_dirs)} scenes, split=test, data_type=real)")
             bar = tqdm(scene_dirs, unit="scene", desc="ROPE")
             for scene_dir in bar:
-                n = _index_scene(
-                    cur        = cur,
-                    scene_dir  = scene_dir,
-                    scene_name = scene_dir.name,
-                    split      = "test",
-                    data_type  = "real",
-                    path_raw   = path_raw,
-                    limit      = limit - total if limit else None,
+                n_total, n_match = _index_scene(
+                    cur             = cur,
+                    scene_dir       = scene_dir,
+                    scene_name      = scene_dir.name,
+                    split           = "test",
+                    data_type       = "real",
+                    path_raw        = path_raw,
+                    kpts_preprocess = kpts_preprocess,
+                    limit           = _remaining(),
+                    filter_kpts     = filter_kpts,
                 )
-                total += n
-                bar.set_postfix(rows=total)
-                if limit and total >= limit:
+                bar.set_postfix(rows=total_rows, matched=matched)
+                if _update(n_total, n_match):
                     done = True
                     bar.close()
                     break
@@ -257,39 +318,40 @@ class HouseCorr3DFrame(ConfigurableDataset):
         # ── synthetic data: SOPE ─────────────────────────────────────────────
         if sope_root.exists() and not done and is_real is not True:
             patch_dirs = sorted(d for d in sope_root.iterdir() if d.is_dir())
-            # collect all scene dirs upfront so tqdm can show total count
-            sope_tasks: list[tuple[Path, str, str]] = []
-            for patch_dir in patch_dirs:
-                for split_name in ("train", "test"):
-                    split_dir = patch_dir / split_name
-                    if not split_dir.exists():
-                        continue
-                    for kind_dir in (d for d in split_dir.iterdir() if d.is_dir()):
-                        for scene_dir in sorted(d for d in kind_dir.iterdir() if d.is_dir()):
-                            scene_name = f"{patch_dir.name}_{scene_dir.name}"
-                            sope_tasks.append((scene_dir, scene_name, split_name))
+            print(f"\nIndexing SOPE ({len(patch_dirs)} patches, data_type=synthetic)")
 
-            print(f"\nIndexing SOPE ({len(patch_dirs)} patches, {len(sope_tasks)} scenes, data_type=synthetic)")
-            bar = tqdm(sope_tasks, unit="scene", desc="SOPE")
+            def _sope_scenes():
+                """Yield (scene_dir, scene_name, split_name) lazily — no upfront NFS scan."""
+                for patch_dir in patch_dirs:
+                    for split_name in ("train", "test"):
+                        split_dir = patch_dir / split_name
+                        if not split_dir.exists():
+                            continue
+                        for kind_dir in sorted(d for d in split_dir.iterdir() if d.is_dir()):
+                            for scene_dir in sorted(d for d in kind_dir.iterdir() if d.is_dir()):
+                                yield scene_dir, f"{patch_dir.name}_{scene_dir.name}", split_name
+
+            bar = tqdm(_sope_scenes(), unit="scene", desc="SOPE")
             for scene_dir, scene_name, split_name in bar:
-                n = _index_scene(
-                    cur        = cur,
-                    scene_dir  = scene_dir,
-                    scene_name = scene_name,
-                    split      = split_name,
-                    data_type  = "synthetic",
-                    path_raw   = path_raw,
-                    limit      = limit - total if limit else None,
+                n_total, n_match = _index_scene(
+                    cur             = cur,
+                    scene_dir       = scene_dir,
+                    scene_name      = scene_name,
+                    split           = split_name,
+                    data_type       = "synthetic",
+                    path_raw        = path_raw,
+                    kpts_preprocess = kpts_preprocess,
+                    limit           = _remaining(),
+                    filter_kpts     = filter_kpts,
                 )
-                total += n
-                bar.set_postfix(rows=total)
-                if limit and total >= limit:
+                bar.set_postfix(rows=total_rows, matched=matched)
+                if _update(n_total, n_match):
                     bar.close()
                     break
 
         con.commit()
         con.close()
-        print(f"\nDone. {total} frame-object rows indexed → {db_path}")
+        print(f"\nDone. {total_rows} rows indexed ({matched} matching filter) → {db_path}")
 
     @classmethod
     def visualize(
@@ -347,19 +409,45 @@ def _index_scene(
     split: str,
     data_type: str,
     path_raw: Path,
+    kpts_preprocess: Path,
     limit: Optional[int] = None,
-) -> int:
-    """Insert frame-object rows for one scene directory. Returns rows inserted.
+    filter_kpts: bool = False,
+) -> tuple[int, int]:
+    """Insert frame-object rows for one scene. Returns (n_total, n_matching).
 
-    Stops early once *limit* rows have been inserted (None = no limit).
+    n_matching counts rows that satisfy the index-time filter:
+    - filter_kpts=True  → only rows with has_kpts=1
+    - filter_kpts=False → same as n_total
+
+    Stops early once *limit* matching rows have been inserted (None = no limit).
     """
-    frame_ids_color = [
+    from o3b.dataset.housecorr3d._frame_utils import (
+        build_cam_intr4x4,
+        build_cam_tform4x4_obj,
+        build_obj_cam_tform,
+        _png_size,
+    )
+
+    frame_ids_color = sorted(
         p.stem[: -len("_color")]
         for p in scene_dir.iterdir()
         if p.name.endswith("_color.png")
-    ]
-    n = 0
-    for frame_id_raw in sorted(frame_ids_color):
+    )
+
+    # Read image dimensions once for the scene (all frames share the same resolution).
+    scene_img_size: tuple[int, int] | None = None
+    for fid in frame_ids_color:
+        p = scene_dir / f"{fid}_color.png"
+        if p.exists():
+            try:
+                scene_img_size = _png_size(p)
+            except Exception:
+                pass
+            break
+
+    n       = 0  # total rows inserted
+    n_match = 0  # rows matching the filter
+    for frame_id_raw in frame_ids_color:
         meta_path = scene_dir / f"{frame_id_raw}_meta.json"
         if not meta_path.exists():
             continue
@@ -372,12 +460,8 @@ def _index_scene(
         intrinsics = cam_meta.get("intrinsics", {})
 
         try:
-            from o3b.dataset.housecorr3d._frame_utils import (
-                build_cam_intr4x4,
-                build_cam_tform4x4_obj,
-            )
-            cam_intr4x4_list      = build_cam_intr4x4(intrinsics, scene_dir / f"{frame_id_raw}_color.png")
-            cam_tform4x4_world    = build_cam_tform4x4_obj(cam_meta)
+            cam_intr4x4_list   = build_cam_intr4x4(intrinsics, img_size=scene_img_size)
+            cam_tform4x4_world = build_cam_tform4x4_obj(cam_meta)
         except Exception:
             cam_intr4x4_list   = None
             cam_tform4x4_world = None
@@ -400,10 +484,18 @@ def _index_scene(
                 mask_id = int(obj_name.split("_")[0])
             except (ValueError, IndexError):
                 mask_id = None
+            bbox_side_len = obj.get("meta", {}).get("bbox_side_len")  # [w, h, d] metres
+            scale_raw = obj.get("meta", {}).get("scale", None)
+            if isinstance(scale_raw, (list, tuple)):
+                obj_scale = float(scale_raw[0])   # isotropic
+            elif scale_raw is not None:
+                obj_scale = float(scale_raw)
+            else:
+                obj_scale = 1.0
+            has_kpts = 1 if (kpts_preprocess / object_id / "kpts3d.pt").exists() else 0
 
             # per-object cam_tform4x4_obj: uses the object's own quaternion/translation
             try:
-                from o3b.dataset.housecorr3d._frame_utils import build_obj_cam_tform
                 cam_tform4x4_obj_list = build_obj_cam_tform(obj)
             except Exception:
                 cam_tform4x4_obj_list = cam_tform4x4_world
@@ -416,8 +508,9 @@ def _index_scene(
                     (frame_id, scene_name, object_idx, mask_id, split, data_type,
                      category, object_id,
                      rgb_path, depth_path, mask_path,
-                     cam_intr4x4, cam_tform4x4_obj, is_valid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     cam_intr4x4, cam_tform4x4_obj, obj_size3d,
+                     obj_scale, has_kpts, is_valid)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     frame_id, scene_name, obj_idx, mask_id, split, data_type,
@@ -425,13 +518,16 @@ def _index_scene(
                     rgb_rpath, depth_rpath, mask_rpath,
                     json.dumps(cam_intr4x4_list)      if cam_intr4x4_list      is not None else None,
                     json.dumps(cam_tform4x4_obj_list) if cam_tform4x4_obj_list is not None else None,
-                    is_valid,
+                    json.dumps(bbox_side_len)          if bbox_side_len         is not None else None,
+                    obj_scale, has_kpts, is_valid,
                 ),
             )
             n += 1
-            if limit is not None and n >= limit:
-                return n
-    return n
+            if not filter_kpts or has_kpts:
+                n_match += 1
+            if limit is not None and n_match >= limit:
+                return n, n_match
+    return n, n_match
 
 
 # ── modality loaders ─────────────────────────────────────────────────────────

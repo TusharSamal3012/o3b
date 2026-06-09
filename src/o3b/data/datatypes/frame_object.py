@@ -12,7 +12,7 @@ from o3b.data.datatypes.object import Object
 class FrameObject(Frame, Object):
     frame_object_id:  str
     cam_bbox2d:       Optional[Tensor] = None  # (4,)     xyxy pixels
-    cam_bbox3d:       Optional[Tensor] = None  # (8, 3)   3-D corners
+    cam_bbox3d:       Optional[Tensor] = None  # (3,) obj-space side lengths for draw_bbox3d, or (8, 3) cam-space corners
     fo_mask:          Optional[Tensor] = None  # (H, W)   bool  object-instance mask
     cam_tform4x4_obj: Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
 
@@ -25,14 +25,13 @@ class FrameObject(Frame, Object):
           depth      – plasma colourmap overlay
           depth_mask – blue semi-transparent depth-validity mask
           frame_mask – orange semi-transparent frame mask
-          cam_bbox2d – lime bounding-box rectangle (xyxy)
+          cam_bbox2d – yellow 2-D bounding box (draw_bbox)
+          cam_bbox3d – 3-D bounding box projected via draw_bbox3d
 
         Returns the composed (3, H, W) tensor in [0, 1].
         """
         import numpy as np
 
-        # ── collect layers ────────────────────────────────────────────────────
-        # Each entry: ("rgb" | "overlay" | "bbox", data)
         layers: dict[str, tuple] = {}
 
         if self.rgb is not None:
@@ -44,7 +43,7 @@ class FrameObject(Frame, Object):
         if self.fo_mask is not None:
             m = self.fo_mask.float().cpu().numpy()
             ov = np.zeros((*m.shape, 4), dtype=np.float32)
-            ov[..., 1] = 0.9       # green
+            ov[..., 1] = 0.9
             ov[..., 3] = m * 0.5
             layers["fo_mask"] = ("overlay", ov)
 
@@ -52,27 +51,46 @@ class FrameObject(Frame, Object):
             import matplotlib.cm as _cm
             d = self.depth.float().cpu().numpy()
             d = (d - d.min()) / (d.max() - d.min() + 1e-8)
-            ov = _cm.plasma(d).astype(np.float32)   # (H, W, 4)
+            ov = _cm.plasma(d).astype(np.float32)
             ov[..., 3] = 0.6
             layers["depth"] = ("overlay", ov)
 
         if self.depth_mask is not None:
             dm = self.depth_mask.float().cpu().numpy()
             ov = np.zeros((*dm.shape, 4), dtype=np.float32)
-            ov[..., 2] = 0.9       # blue
+            ov[..., 2] = 0.9
             ov[..., 3] = dm * 0.4
             layers["depth_mask"] = ("overlay", ov)
 
         if self.mask is not None:
             fm = self.mask.float().cpu().numpy()
             ov = np.zeros((*fm.shape, 4), dtype=np.float32)
-            ov[..., 0] = 1.0; ov[..., 1] = 0.55   # orange
+            ov[..., 0] = 1.0; ov[..., 1] = 0.55
             ov[..., 3] = fm * 0.4
             layers["frame_mask"] = ("overlay", ov)
 
         if self.cam_bbox2d is not None:
-            x1, y1, x2, y2 = self.cam_bbox2d.cpu().tolist()
-            layers["cam_bbox2d"] = ("bbox", (x1, y1, x2, y2))
+            layers["cam_bbox2d"] = ("draw_bbox", self.cam_bbox2d.cpu())
+
+        if (self.cam_bbox3d is not None
+                and self.cam_intr4x4 is not None
+                and self.cam_tform4x4_obj is not None
+                and self.cam_bbox3d.shape == torch.Size([3])):
+            layers["cam_bbox3d"] = ("draw_bbox3d", (
+                self.cam_bbox3d.cpu(),
+                self.cam_intr4x4.cpu(),
+                self.cam_tform4x4_obj.cpu(),
+            ))
+
+        if (self.obj_kpts3d is not None
+                and self.cam_intr4x4 is not None
+                and self.cam_tform4x4_obj is not None):
+            layers["obj_kpts3d"] = ("draw_kpts2d", (
+                self.obj_kpts3d.cpu(),
+                self.obj_kpts3d_mask.cpu() if self.obj_kpts3d_mask is not None else None,
+                self.cam_intr4x4.cpu(),
+                self.cam_tform4x4_obj.cpu(),
+            ))
 
         if not layers:
             return None
@@ -89,25 +107,67 @@ class FrameObject(Frame, Object):
         def _compose_numpy() -> np.ndarray:
             H, W = _hw()
             canvas = np.zeros((H, W, 3), dtype=np.float32)
-            if "rgb" in layers and active["rgb"]:
+            if "rgb" in layers and active.get("rgb", True):
                 canvas = layers["rgb"][1].copy()
             elif "rgb" in layers:
-                canvas[:] = 0.15        # dark grey placeholder
+                canvas[:] = 0.15
 
             for k in label_order:
-                if k == "rgb" or not active[k]:
+                if k == "rgb" or not active.get(k, True):
                     continue
                 kind, data = layers[k]
                 if kind == "overlay":
                     alpha = data[..., 3:4]
                     canvas = canvas * (1 - alpha) + data[..., :3] * alpha
-                # bbox is handled via matplotlib patch — not blended into canvas
 
-            return np.clip(canvas, 0, 1)
+            # apply tensor-based bbox draws
+            canvas_t = torch.from_numpy(canvas).permute(2, 0, 1)  # (3,H,W) float [0,1]
+
+            if "cam_bbox2d" in layers and active.get("cam_bbox2d", True):
+                from o3b.cv.visual.draw import draw_bbox
+                try:
+                    canvas_t = draw_bbox(
+                        canvas_t, layers["cam_bbox2d"][1],
+                        color=(255, 255, 0), line_width=2,
+                    ).float().div(255.0)
+                except Exception:
+                    pass
+
+            if "cam_bbox3d" in layers and active.get("cam_bbox3d", True):
+                from o3b.cv.visual.draw import draw_bbox3d
+                try:
+                    obj_size3d, cam_intr4x4, cam_tform4x4_obj = layers["cam_bbox3d"][1]
+                    canvas_t = draw_bbox3d(
+                        canvas_t, obj_size3d, cam_intr4x4, cam_tform4x4_obj,
+                    ).float().div(255.0)
+                except Exception:
+                    pass
+
+            if "obj_kpts3d" in layers and active.get("obj_kpts3d", True):
+                from o3b.cv.visual.draw import draw_pixels, get_colors
+                try:
+                    kpts3d, kpts_mask, cam_intr4x4, cam_tform4x4_obj = layers["obj_kpts3d"][1]
+                    # drop masked-out keypoints before projection
+                    if kpts_mask is not None:
+                        kpts3d = kpts3d[kpts_mask]
+                    K = kpts3d.shape[0]
+                    if K == 0:
+                        raise ValueError("no valid keypoints")
+                    kpts3d_h = torch.cat([kpts3d, torch.ones(K, 1)], dim=-1)        # (K, 4)
+                    proj4x4  = cam_intr4x4 @ cam_tform4x4_obj                       # (4, 4)
+                    cam_pts  = (proj4x4 @ kpts3d_h.T).T                             # (K, 4)
+                    kpts2d   = cam_pts[:, :2] / cam_pts[:, 2:3].clamp(min=1e-6)     # (K, 2)
+                    colors   = get_colors(K)                                         # (K, 3) HSV rainbow
+                    canvas_t = draw_pixels(
+                        canvas_t, pxls=kpts2d, colors=colors, radius_in=2, radius_out=5,
+                    ).float().div(255.0)
+                except Exception:
+                    pass
+
+            return np.clip(canvas_t.permute(1, 2, 0).numpy(), 0, 1)
 
         if show:
             import matplotlib.pyplot as plt
-            import matplotlib.patches as mpatches
             from matplotlib.widgets import CheckButtons
 
             fig, ax = plt.subplots(figsize=(9, 6))
@@ -120,8 +180,7 @@ class FrameObject(Frame, Object):
             ax.set_title(title, fontsize=9)
 
             im = ax.imshow(_compose_numpy())
-            bbox_patch: list = []
-            cat_text = (
+            if cat_str:
                 ax.text(
                     0.01, 0.97, cat_str,
                     transform=ax.transAxes,
@@ -129,22 +188,9 @@ class FrameObject(Frame, Object):
                     color="white", va="top", ha="left",
                     bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.55),
                 )
-                if cat_str else None
-            )
 
             def _redraw(_label: str = "") -> None:
                 im.set_data(_compose_numpy())
-                for p in bbox_patch:
-                    p.remove()
-                bbox_patch.clear()
-                if "cam_bbox2d" in layers and active.get("cam_bbox2d", True):
-                    x1, y1, x2, y2 = layers["cam_bbox2d"][1]
-                    p = mpatches.Rectangle(
-                        (x1, y1), x2 - x1, y2 - y1,
-                        linewidth=2, edgecolor="lime", facecolor="none",
-                    )
-                    ax.add_patch(p)
-                    bbox_patch.append(p)
                 fig.canvas.draw_idle()
 
             _redraw()

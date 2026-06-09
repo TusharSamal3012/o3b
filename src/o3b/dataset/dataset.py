@@ -246,7 +246,7 @@ class ConfigurableDataset(_TorchDataset):
         raise NotImplementedError(f"{cls.__name__} does not implement fetch()")
 
     @classmethod
-    def index(cls, cfg: "DatasetConfig", *, db: Optional[Path] = None) -> None:
+    def index(cls, cfg: "DatasetConfig", *, db: Optional[Path] = None, **kwargs) -> None:
         raise NotImplementedError(f"{cls.__name__} does not implement index()")
 
     @classmethod

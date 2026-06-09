@@ -1,6 +1,6 @@
 # o3b dataset fetch -d hc3d_frame_object
-# o3b dataset index -d hc3d_frame_object
 # o3b dataset index -d hc3d_frame_object --remove
+# (filter_count_max stops indexing after this many filter-matching rows; also limits viz)
 
 # o3b dataset viz   -d hc3d_frame_object
 
@@ -24,13 +24,17 @@ filter_is_real: false
 modalities:
   - rgb
   - fo_mask
-  #- depth 
+  #- depth
   #- depth_mask
-  #- cam_intr4x4
+  - cam_intr4x4
   - cam_tform4x4_obj
-  - category
   - cam_bbox2d
+  - cam_bbox3d
+  - obj_kpts3d
+  - obj_kpts3d_mask
+  - category
 
+filter_has_kpts: true
 filter_count_max: 50
 
 categories:

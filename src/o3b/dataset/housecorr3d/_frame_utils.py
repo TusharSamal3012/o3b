@@ -13,13 +13,17 @@ import torch
 
 def build_cam_intr4x4(
     intrinsics: dict,
-    rgb_path: Path,
+    rgb_path: Optional[Path] = None,
+    img_size: Optional[tuple] = None,
 ) -> list:
     """Build 4×4 intrinsic matrix, adjusting for any image downsampling.
 
     Omni6DPose stores intrinsics at the sensor resolution, but the
     saved color PNG may have been downsampled.  We correct fx/fy/cx/cy
     by the actual downsample ratio.
+
+    Pass ``img_size=(width, height)`` to skip file I/O (e.g. when the
+    same dimensions are shared across all frames in a scene).
     """
     fx = float(intrinsics.get("fx", 0))
     fy = float(intrinsics.get("fy", 0))
@@ -29,15 +33,19 @@ def build_cam_intr4x4(
     meta_w = float(intrinsics.get("width", 0))
 
     # correct for downsampling if the PNG was saved at a lower resolution
-    if rgb_path.exists() and meta_h > 0 and meta_w > 0:
+    if meta_h > 0 and meta_w > 0:
         try:
-            import torchvision.io as tio
-            img = tio.read_image(str(rgb_path))   # (C, H, W)
-            actual_h, actual_w = img.shape[-2], img.shape[-1]
-            ds_h = meta_h / actual_h
-            ds_w = meta_w / actual_w
-            fx /= ds_w;  cx /= ds_w
-            fy /= ds_h;  cy /= ds_h
+            if img_size is not None:
+                actual_w, actual_h = img_size
+            elif rgb_path is not None and rgb_path.exists():
+                actual_w, actual_h = _png_size(rgb_path)
+            else:
+                actual_w, actual_h = None, None
+            if actual_w and actual_h:
+                ds_h = meta_h / actual_h
+                ds_w = meta_w / actual_w
+                fx /= ds_w;  cx /= ds_w
+                fy /= ds_h;  cy /= ds_h
         except Exception:
             pass
 
@@ -110,3 +118,17 @@ def _inv_tform4x4(T: torch.Tensor) -> torch.Tensor:
     M[:3, :3] = Rt
     M[:3,  3] = -(Rt @ tr)
     return M
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    """Return (width, height) of a PNG by reading only the 24-byte file header.
+
+    Much faster than loading the full image, especially over NFS.
+    PNG spec: bytes 16-19 = width, bytes 20-23 = height (big-endian uint32).
+    """
+    import struct
+    with open(path, "rb") as f:
+        f.seek(16)
+        data = f.read(8)
+    w, h = struct.unpack(">II", data)
+    return w, h
