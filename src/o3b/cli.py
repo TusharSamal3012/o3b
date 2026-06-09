@@ -237,20 +237,19 @@ def _build_platform_parser(sub):
 
 
 def _load_platform_config(platform: str):
-    """Load a platform config using Hydra, with configs/platform/ as the config root."""
-    from hydra import initialize_config_dir, compose
+    """Load a platform config, resolving its defaults chain via OmegaConf merge."""
+    from omegaconf import OmegaConf
+    from o3b.io import _load_yaml_with_defaults
 
     configs_dir = (Path(__file__).parent.parent / "configs" / "platform").resolve()
     if not configs_dir.is_dir():
         raise FileNotFoundError(f"Platform config directory not found: {configs_dir}")
 
-    with initialize_config_dir(
-        version_base=None,
-        config_dir=str(configs_dir),
-        job_name="platform_setup",
-    ):
-        cfg = compose(config_name=platform)
+    cfg_path = configs_dir / f"{platform}.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Platform config not found: {cfg_path}")
 
+    cfg = OmegaConf.create(_load_yaml_with_defaults(cfg_path))
     return cfg, configs_dir
 
 

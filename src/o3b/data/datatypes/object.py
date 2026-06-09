@@ -134,6 +134,7 @@ def _pca_vert_colors(vert_feats: "Tensor") -> "Tensor":
     """Project per-vertex features (V, F) → RGB via PCA, float32 (V, 3) in [0, 1]."""
     V, F = vert_feats.shape
     flat = vert_feats.float().cpu()
+    flat = torch.nan_to_num(flat, nan=0.0, posinf=0.0, neginf=0.0)
     flat = flat - flat.mean(0)
     q = min(3, F)
     _, _, Vmat = torch.pca_lowrank(flat, q=q, niter=4)

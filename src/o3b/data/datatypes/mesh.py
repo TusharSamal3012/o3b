@@ -112,8 +112,9 @@ def _extract_vert_feats(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── Diff3F path: delegate rendering + feature extraction to the model ─────
-    if "diff3f" in feature_model_name.lower():
+    # ── Models that do their own rendering (diff3f, densematcher/dm) ────────────
+    _SELF_RENDERING = {"diff3f", "dm"}
+    if feature_model_name.lower() in _SELF_RENDERING or "diff3f" in feature_model_name.lower():
         from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch
         model = OD3D_Model.create_by_name(feature_model_name)

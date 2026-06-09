@@ -10,7 +10,6 @@ import zipfile
 import shutil
 import os
 import gdown
-from hydra import compose, initialize, initialize_config_dir
 import inspect
 from omegaconf import DictConfig, OmegaConf
 import json
@@ -175,172 +174,104 @@ def rm_dir(path: Path, fast=False):
                 logger.warning(e)
 
 from tqdm import tqdm
-from omegaconf import open_dict
 import multiprocessing
 
 
-def load_single_hierarchical_config(
-    procnum,
-    return_dict,
-    config_dir_rel,
-    benchmark,
-    platform,
-    ablations,
-    overrides,
-):
-    """worker function"""
-    logger.info(f"start process {procnum}")
-    return_dict[procnum] = procnum
-    with initialize(version_base=None, config_path=config_dir_rel, job_name="test_app"):
-        overrides = (
-            [
-                f"+ablations/{Path(ablation).parent}={Path(ablation).stem}"
-                for ablation in ablations
-            ]
-            + [
-                "platform=" + platform,
-            ]
-            + overrides
-        )
-        cfg = compose(config_name=benchmark, overrides=overrides)
+def _load_yaml_with_defaults(path: Path, overrides=None) -> dict:
+    """Load a YAML config, resolving the 'defaults:' list via OmegaConf merge.
 
-        with open_dict(cfg):
-            cfg.ablation_name = "_".join(
-                [Path(ablation).stem for ablation in ablations],
-            )
+    Supports:
+    - Plain string parents in the same directory: ``hc3d`` → loads ``hc3d.yaml``
+    - ``_self_``: inserts the current file at this merge position
+    - ``optional`` prefix: silently skips missing files
+    - Dict-form group@package entries: ``credentials@credentials: default``
+      loads ``credentials/default.yaml`` and merges it under key ``credentials``
+    - Overrides passed as ``["key=value", ...]`` strings
+    """
+    def _merge(yaml_path: Path):
+        raw = OmegaConf.load(yaml_path)
+        raw_dict = OmegaConf.to_container(raw, resolve=False)
+        defaults_list = raw_dict.pop("defaults", [])
+        content = OmegaConf.create(raw_dict)
 
-        logger.info(cfg.ablation_name)
-        return_dict[procnum] = cfg
+        merged = OmegaConf.create({})
+        self_inserted = False
+
+        for entry in defaults_list:
+            if entry == "_self_":
+                merged = OmegaConf.merge(merged, content)
+                self_inserted = True
+                continue
+
+            if isinstance(entry, str):
+                optional = entry.startswith("optional ")
+                name = entry.removeprefix("optional ").strip()
+                if "@" in name or name.startswith("override "):
+                    continue  # skip group-package string patterns
+                parent_path = yaml_path.parent / f"{name}.yaml"
+                if not parent_path.exists():
+                    if not optional:
+                        logger.warning(f"Config not found (skipping): {parent_path}")
+                    continue
+                merged = OmegaConf.merge(merged, _merge(parent_path))
+
+            elif isinstance(entry, dict):
+                for k, v in entry.items():
+                    optional = "optional" in k.split("@")[0].split()
+                    k = k.replace("optional", "").replace("override", "").strip()
+                    if "@" not in k:
+                        continue
+                    group, _, package = k.partition("@")
+                    group, package = group.strip(), package.strip()
+                    parent_path = yaml_path.parent / group / f"{str(v).strip()}.yaml"
+                    if not parent_path.exists():
+                        if not optional:
+                            logger.warning(f"Config not found (skipping): {parent_path}")
+                        continue
+                    parent_cfg = _merge(parent_path)
+                    if package:
+                        merged = OmegaConf.merge(merged, OmegaConf.create({package: parent_cfg}))
+                    else:
+                        merged = OmegaConf.merge(merged, parent_cfg)
+
+        if not self_inserted:
+            merged = OmegaConf.merge(merged, content)
+
+        return merged
+
+    cfg = _merge(Path(path).resolve())
+
+    if overrides:
+        for ov in overrides:
+            key, _, val = ov.partition("=")
+            key = key.lstrip("+~")
+            try:
+                OmegaConf.update(cfg, key, val)
+            except Exception:
+                pass
+
+    return OmegaConf.to_container(cfg, resolve=True)
 
 
-def load_multiple_hierarchical_configs(
-    benchmark="defaults",
-    platform="local",
-    multiple_ablations=[],
-    mp=True,
-):
-    config_dir_rel = "../../config"
-    cfgs = []
-    overrides = []
-    if mp:
-        manager = multiprocessing.Manager()
-        return_dict = manager.dict()
-        jobs = []
-        for a, ablations in tqdm(enumerate(multiple_ablations)):
-            p = multiprocessing.Process(
-                target=load_single_hierarchical_config,
-                args=(
-                    a,
-                    return_dict,
-                    config_dir_rel,
-                    benchmark,
-                    platform,
-                    ablations,
-                    overrides,
-                ),
-            )
-            jobs.append(p)
-            p.start()
-
-        for a, proc in enumerate(jobs):
-            proc.join()
-            cfgs.append(return_dict[a])
-    else:
-        return_dict = {}
-        for a, ablations in tqdm(enumerate(multiple_ablations)):
-            load_single_hierarchical_config(a, return_dict, config_dir_rel, benchmark, platform, ablations,
-                                            overrides)
-
-            cfgs.append(return_dict[a])
-    return cfgs
-
-
-def load_hierarchical_config(
-    benchmark="defaults",
-    platform="local",
-    ablations=[],
-    overrides=[],
-):
-    config_dir_rel = "../../config"
-    with initialize(version_base=None, config_path=config_dir_rel, job_name="test_app"):
-        overrides = (
-            [
-                f"+ablations/{Path(ablation).parent}={Path(ablation).stem}"
-                for ablation in ablations
-            ]
-            + ["platform=" + platform]
-            + overrides
-        )
-        cfg = compose(config_name=benchmark, overrides=overrides)
-
-        # if ablations is None:
-        #    cfg = compose(config_name=benchmark, overrides=["platform=" + platform] + overrides)
-        # else:
-        #    cfg = compose(config_name=benchmark, overrides=["+ablations=" + ablation, "platform=" + platform] + overrides)
-    return cfg
+def read_config_extern(fpath: Path) -> DictConfig:
+    """Load a YAML config at fpath, resolving its defaults chain."""
+    return OmegaConf.create(_load_yaml_with_defaults(Path(fpath)))
 
 
 def read_config_intern(
     rfpath: Path = None,
-    benchmark="defaults",
-    platform="local",
-    overrides=[],
-):
-    config_dir_rel = "../../config"
-
-    try:
-        with initialize(
-            version_base=None,
-            config_path=config_dir_rel,
-            job_name="test_app",
-        ):
-            if rfpath is not None:
-                cfg = compose(
-                    config_name=benchmark,
-                    overrides=[
-                        f"+{rfpath.parent}=" + str(rfpath.stem),
-                        "platform=" + platform,
-                    ]
-                    + overrides,
-                )
-            else:
-                cfg = compose(
-                    config_name=benchmark,
-                    overrides=[
-                        "platform=" + platform,
-                    ]
-                    + overrides,
-                )
-
-        cfg = cfg
-        if rfpath is not None:
-            for key in str(rfpath.parent).split("/"):
-                cfg = cfg.get(key)
-    except hydra.errors.ConfigCompositionException as e:
-        fpath = Path("config").joinpath(rfpath)
-        logger.warning(e)
-        logger.warning("trying to read with OmegaConf")
-        cfg = OmegaConf.load(fpath)
-
-    return cfg
-
-
-import hydra.errors
-
-
-def read_config_extern(fpath: Path):
-    try:
-        with initialize_config_dir(
-            config_dir=str(fpath.parent.absolute()),
-            job_name="test_app_extern",
-        ):
-            cfg = compose(config_name=fpath.stem)
-    except hydra.errors.ConfigCompositionException as e:
-        logger.warning(e)
-        logger.warning("trying to read with OmegaConf")
-        cfg = OmegaConf.load(fpath)
-
-    return cfg
+    benchmark: str = "defaults",
+    platform: str = "local",
+    overrides: list = [],
+) -> DictConfig:
+    """Load a config from the o3b configs directory (legacy API)."""
+    configs_root = Path(__file__).parent.parent.parent / "configs"
+    if rfpath is not None:
+        fpath = configs_root / rfpath
+        if fpath.exists():
+            return read_config_extern(fpath)
+        logger.warning(f"Config not found: {fpath}")
+    return OmegaConf.create({})
 
 
 def write_config_to_json_file(config: DictConfig, fpath: Path):

@@ -123,17 +123,9 @@ class DatasetConfig:
 
 
 def _load_yaml_with_defaults(path: Path, overrides: "list[str] | None" = None) -> dict:
-    """Load a YAML config via Hydra compose, resolving defaults and ${} interpolations."""
-    from hydra import compose, initialize_config_dir
-    from hydra.core.global_hydra import GlobalHydra
-    from omegaconf import OmegaConf
-
-    path = Path(path).resolve()
-    GlobalHydra.instance().clear()
-    with initialize_config_dir(config_dir=str(path.parent), version_base=None):
-        cfg = compose(config_name=path.stem, overrides=overrides or [])
-    GlobalHydra.instance().clear()
-    return OmegaConf.to_container(cfg, resolve=True)
+    """Load a YAML config, resolving defaults and ${} interpolations."""
+    from o3b.io import _load_yaml_with_defaults as _impl
+    return _impl(path, overrides=overrides)
 
 
 # ── Dataset registry ──────────────────────────────────────────────────────────

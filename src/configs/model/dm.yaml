@@ -1,0 +1,24 @@
+class_name: DenseMatcher
+
+# FeatUp upsampler checkpoint (parsed for imsize / channelnorm / unitnorm / rotinv).
+pretrained_upsampler_path: "checkpoints/featup_imsize=384_channelnorm=False_unitnorm=False_rotinv=True/final.ckpt"
+
+# Directory containing SDDINO aggregation network weights (best_384.PTH etc.)
+aggre_net_weights_folder: "checkpoints/SDDINO_weights"
+
+# Trained DiffusionNet checkpoint (leave empty to skip loading, useful for ablations).
+diffusionnet_ckpt_path: "checkpoints/exp_mvmatcher_imsize=384_width=512_nviews=3x1_wrecon=10.0_cutprob=0.5_blocks=8_release_jitter=0.0/final.ckpt"
+
+# Multi-view rendering: total views = azimuth * elevation (+ 2 poles inside batch_render).
+num_views_azimuth: 3
+num_views_elevation: 1
+
+# DiffusionNet architecture (must match the loaded checkpoint).
+width: 512
+num_blocks: 8
+
+# If true, use raw 768-dim SDDINO multi-view features instead of the
+# 512-dim DiffusionNet-refined output (out_dim becomes 768).
+use_mv_features: true
+
+freeze: true
