@@ -77,10 +77,12 @@ class HouseCorr3DFrame(ConfigurableDataset):
             limit     = self.cfg.filter_count_max
 
             split_clause = "" if split == "all" else f" AND split = '{split}'"
-            real_clause  = (
-                " AND data_type = 'real'" if is_real
-                else " AND data_type = 'synthetic'"
-            )
+            if is_real is None:
+                real_clause = ""
+            elif is_real:
+                real_clause = " AND data_type = 'real'"
+            else:
+                real_clause = " AND data_type = 'synthetic'"
             limit_clause = f" LIMIT {limit}" if limit else ""
 
             if cats:
@@ -119,9 +121,13 @@ class HouseCorr3DFrame(ConfigurableDataset):
         if _want("depth") and row.get("depth_path"):
             depth = _load_depth_tensor(path_raw / row["depth_path"])
 
+        depth_mask = None
+        if _want("depth_mask") and depth is not None:
+            depth_mask = (depth > 0)
+
         mask = None
-        if _want("mask") and row.get("mask_path"):
-            mask = _load_mask_tensor(path_raw / row["mask_path"], row["object_idx"])
+        if _want("fo_mask") and row.get("mask_path") and row.get("mask_id") is not None:
+            mask = _load_mask_tensor(path_raw / row["mask_path"], int(row["mask_id"]))
 
         cam_intr4x4 = None
         if _want("cam_intr4x4") and row.get("cam_intr4x4"):
@@ -143,6 +149,7 @@ class HouseCorr3DFrame(ConfigurableDataset):
             object_id        = object_id,
             rgb              = rgb,
             depth            = depth,
+            depth_mask       = depth_mask,
             fo_mask          = mask,
             cam_intr4x4      = cam_intr4x4,
             cam_tform4x4_obj = cam_tform4x4_obj,
@@ -157,14 +164,26 @@ class HouseCorr3DFrame(ConfigurableDataset):
         HouseCorr3D.fetch(cfg, url=url)
 
     @classmethod
-    def index(cls, cfg: DatasetConfig, *, db: Optional[Path] = None) -> None:
+    def index(
+        cls,
+        cfg: DatasetConfig,
+        *,
+        db: Optional[Path] = None,
+        remove: bool = False,
+    ) -> None:
         path_raw        = cls._path_raw(cfg)
         path_preprocess = cls._path_preprocess(cfg)
         db_path         = db or path_preprocess / "frames.db"
+        limit     = cfg.filter_count_max  # None = no limit
+        is_real   = cfg.filter_is_real    # None = both, True = real only, False = synthetic only
 
         print(f"path_raw        : {path_raw}")
         print(f"path_preprocess : {path_preprocess}")
         print(f"db              : {db_path}")
+        if limit:
+            print(f"filter_count_max: {limit}  (indexing stops after this many rows)")
+        if is_real is not None:
+            print(f"filter_is_real  : {is_real}  ({'real (ROPE) only' if is_real else 'synthetic (SOPE) only'})")
 
         rope_root = path_raw / "ROPE"
         sope_root = path_raw / "SOPE"
@@ -178,6 +197,9 @@ class HouseCorr3DFrame(ConfigurableDataset):
             sys.exit(1)
 
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        if remove and db_path.exists():
+            db_path.unlink()
+            print(f"Removed existing index: {db_path}")
         # Remove stale WAL/SHM files so we get a clean exclusive lock immediately.
         for suffix in ("-wal", "-shm"):
             stale = db_path.with_name(db_path.name + suffix)
@@ -191,6 +213,7 @@ class HouseCorr3DFrame(ConfigurableDataset):
                 frame_id         TEXT PRIMARY KEY,
                 scene_name       TEXT    NOT NULL,
                 object_idx       INTEGER NOT NULL,
+                mask_id          INTEGER,
                 split            TEXT    NOT NULL,
                 data_type        TEXT    NOT NULL,
                 category         TEXT,
@@ -207,26 +230,32 @@ class HouseCorr3DFrame(ConfigurableDataset):
         from tqdm import tqdm
 
         total = 0
+        done  = False
 
         # ── real data: ROPE (always test split) ───────────────────────────────
-        if rope_root.exists():
+        if rope_root.exists() and not done and is_real is not False:
             scene_dirs = sorted(d for d in rope_root.iterdir() if d.is_dir())
             print(f"\nIndexing ROPE ({len(scene_dirs)} scenes, split=test, data_type=real)")
             bar = tqdm(scene_dirs, unit="scene", desc="ROPE")
             for scene_dir in bar:
                 n = _index_scene(
-                    cur       = cur,
-                    scene_dir = scene_dir,
-                    scene_name= scene_dir.name,
-                    split     = "test",
-                    data_type = "real",
-                    path_raw  = path_raw,
+                    cur        = cur,
+                    scene_dir  = scene_dir,
+                    scene_name = scene_dir.name,
+                    split      = "test",
+                    data_type  = "real",
+                    path_raw   = path_raw,
+                    limit      = limit - total if limit else None,
                 )
                 total += n
                 bar.set_postfix(rows=total)
+                if limit and total >= limit:
+                    done = True
+                    bar.close()
+                    break
 
         # ── synthetic data: SOPE ─────────────────────────────────────────────
-        if sope_root.exists():
+        if sope_root.exists() and not done and is_real is not True:
             patch_dirs = sorted(d for d in sope_root.iterdir() if d.is_dir())
             # collect all scene dirs upfront so tqdm can show total count
             sope_tasks: list[tuple[Path, str, str]] = []
@@ -250,9 +279,13 @@ class HouseCorr3DFrame(ConfigurableDataset):
                     split      = split_name,
                     data_type  = "synthetic",
                     path_raw   = path_raw,
+                    limit      = limit - total if limit else None,
                 )
                 total += n
                 bar.set_postfix(rows=total)
+                if limit and total >= limit:
+                    bar.close()
+                    break
 
         con.commit()
         con.close()
@@ -293,13 +326,16 @@ class HouseCorr3DFrame(ConfigurableDataset):
             dataset._frame_rows_id = dataset._frame_rows_id[:limit]
 
         print(f"Showing {len(dataset._frame_rows_id)} / {total} frames  {db_path}\n")
-        for i in dataset._frame_rows_id:
+        for seq_idx, i in enumerate(dataset._frame_rows_id):
             row = dataset._frame_rows[i]
             print(
+                f"[{seq_idx + 1}/{len(dataset._frame_rows_id)}]"
                 f"  {row['frame_id']:<60}"
                 f"  cat={row.get('category','?'):<20}"
                 f"  split={row['split']}  {row['data_type']}"
             )
+            fo = dataset._load_frame_object(seq_idx)
+            fo.viz(show=True)
 
 
 # ── indexing helpers ──────────────────────────────────────────────────────────
@@ -311,8 +347,12 @@ def _index_scene(
     split: str,
     data_type: str,
     path_raw: Path,
+    limit: Optional[int] = None,
 ) -> int:
-    """Insert frame-object rows for one scene directory. Returns rows inserted."""
+    """Insert frame-object rows for one scene directory. Returns rows inserted.
+
+    Stops early once *limit* rows have been inserted (None = no limit).
+    """
     frame_ids_color = [
         p.stem[: -len("_color")]
         for p in scene_dir.iterdir()
@@ -354,6 +394,12 @@ def _index_scene(
             is_valid  = int(bool(obj.get("is_valid", True)))
             category  = obj.get("meta", {}).get("class_name")
             object_id = obj.get("meta", {}).get("oid") or obj_name
+            # Mask EXR pixel value = integer prefix of the object key (e.g. "5_mango_..." → 5),
+            # NOT the sequential 'id' field (1, 2, 3...).
+            try:
+                mask_id = int(obj_name.split("_")[0])
+            except (ValueError, IndexError):
+                mask_id = None
 
             # per-object cam_tform4x4_obj: uses the object's own quaternion/translation
             try:
@@ -367,22 +413,24 @@ def _index_scene(
             cur.execute(
                 """
                 INSERT OR IGNORE INTO frames
-                    (frame_id, scene_name, object_idx, split, data_type,
+                    (frame_id, scene_name, object_idx, mask_id, split, data_type,
                      category, object_id,
                      rgb_path, depth_path, mask_path,
                      cam_intr4x4, cam_tform4x4_obj, is_valid)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    frame_id, scene_name, obj_idx, split, data_type,
+                    frame_id, scene_name, obj_idx, mask_id, split, data_type,
                     category, object_id,
                     rgb_rpath, depth_rpath, mask_rpath,
-                    json.dumps(cam_intr4x4_list)   if cam_intr4x4_list   is not None else None,
+                    json.dumps(cam_intr4x4_list)      if cam_intr4x4_list      is not None else None,
                     json.dumps(cam_tform4x4_obj_list) if cam_tform4x4_obj_list is not None else None,
                     is_valid,
                 ),
             )
             n += 1
+            if limit is not None and n >= limit:
+                return n
     return n
 
 
@@ -401,34 +449,40 @@ def _load_image_tensor(path: Path) -> Optional[torch.Tensor]:
 
 
 def _load_depth_tensor(path: Path) -> Optional[torch.Tensor]:
-    """Load depth EXR → (H, W) float32."""
+    """Load depth EXR → (H, W) float32 in metres."""
     if not path.exists():
         return None
     try:
-        import imageio.v3 as iio
-        import numpy as np
-        arr = iio.imread(str(path), plugin="EXR-FI")   # (H, W) or (H, W, C)
-        arr = np.array(arr, dtype=np.float32)
+        import os, cv2, numpy as np
+        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+        arr = cv2.imread(str(path), cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
+        if arr is None:
+            return None
         if arr.ndim == 3:
-            arr = arr[..., 0]
-        return torch.from_numpy(arr)
+            arr = arr[:, :, 0]
+        return torch.from_numpy(arr.astype(np.float32))
     except Exception:
         return None
 
 
-def _load_mask_tensor(path: Path, object_idx: int) -> Optional[torch.Tensor]:
-    """Load mask EXR for a specific object index → (H, W) bool."""
+def _load_mask_tensor(path: Path, mask_id: int) -> Optional[torch.Tensor]:
+    """Load scene mask EXR and return a bool (H, W) for the given object mask_id.
+
+    Omni6DPose stores all objects in one EXR.  Channel 2 (BGR) scaled by 255
+    gives an integer object-id per pixel matching the 'id' field in meta.json.
+    """
     if not path.exists():
         return None
     try:
-        import imageio.v3 as iio
-        import numpy as np
-        arr = iio.imread(str(path), plugin="EXR-FI")   # (H, W, N_objs)
-        arr = np.array(arr, dtype=np.float32)
-        if arr.ndim == 2:
-            return torch.from_numpy(arr > 0)
-        if object_idx < arr.shape[-1]:
-            return torch.from_numpy(arr[..., object_idx] > 0)
-        return None
+        import os, cv2, numpy as np
+        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
+        arr = cv2.imread(str(path), cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
+        if arr is None:
+            return None
+        ids = np.array(arr[:, :, 2] * 255, dtype=np.uint8)
+        ids[ids == 255] = 0  # bug fix for test_real subset (spurious 255 values)
+        return torch.from_numpy(ids == mask_id)
     except Exception:
         return None

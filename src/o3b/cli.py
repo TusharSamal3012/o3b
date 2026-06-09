@@ -45,6 +45,8 @@ def _build_dataset_parser(sub):
     p_index = ds_sub.add_parser("index", help="Build SQLite index from on-disk data")
     _add_config(p_index)
     p_index.add_argument("--db", type=Path, default=None, metavar="FILE")
+    p_index.add_argument("--remove", action="store_true",
+                         help="Delete any existing index for this dataset before indexing")
 
     p_vis = ds_sub.add_parser("viz", help="Summarize and optionally render dataset objects")
     _add_config(p_vis)
@@ -125,7 +127,7 @@ def _run_dataset(args):
     if args.dataset_command == "fetch":
         cls.fetch(cfg, url=args.url)
     elif args.dataset_command == "index":
-        cls.index(cfg, db=args.db)
+        cls.index(cfg, db=args.db, remove=args.remove)
     elif args.dataset_command == "viz":
         if args.filter_has_kpts:
             cfg.filter_has_kpts = True

@@ -62,9 +62,9 @@ class HouseCorr3D(ConfigurableDataset):
             if self.cfg.item_type == ItemType.OBJECT:
                 kpts_clause = " AND obj_kpts3d IS NOT NULL" if self.cfg.filter_has_kpts else ""
                 real_clause = (
-                    " AND object_id LIKE '%real%'"
-                    if self.cfg.filter_is_real else
-                    " AND object_id NOT LIKE '%real%'"
+                    " AND object_id LIKE '%real%'" if self.cfg.filter_is_real is True
+                    else " AND object_id NOT LIKE '%real%'" if self.cfg.filter_is_real is False
+                    else ""
                 )
                 limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                 if cats:
@@ -86,8 +86,10 @@ class HouseCorr3D(ConfigurableDataset):
                 )
                 real_clause = (
                     " AND src_o.object_id LIKE '%real%' AND trgt_o.object_id LIKE '%real%'"
-                    if self.cfg.filter_is_real else
-                    " AND src_o.object_id NOT LIKE '%real%' AND trgt_o.object_id NOT LIKE '%real%'"
+                    if self.cfg.filter_is_real is True
+                    else " AND src_o.object_id NOT LIKE '%real%' AND trgt_o.object_id NOT LIKE '%real%'"
+                    if self.cfg.filter_is_real is False
+                    else ""
                 )
                 limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                 if cats:

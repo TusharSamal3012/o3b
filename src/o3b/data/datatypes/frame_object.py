@@ -16,6 +16,152 @@ class FrameObject(Frame, Object):
     fo_mask:          Optional[Tensor] = None  # (H, W)   bool  object-instance mask
     cam_tform4x4_obj: Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
 
+    def viz(self, show: bool = True) -> Optional[Tensor]:
+        """Interactive overlay viewer with CheckButtons to toggle modalities.
+
+        Layers are composited onto a single canvas:
+          rgb        – base image
+          fo_mask    – green semi-transparent instance mask
+          depth      – plasma colourmap overlay
+          depth_mask – blue semi-transparent depth-validity mask
+          frame_mask – orange semi-transparent frame mask
+          cam_bbox2d – lime bounding-box rectangle (xyxy)
+
+        Returns the composed (3, H, W) tensor in [0, 1].
+        """
+        import numpy as np
+
+        # ── collect layers ────────────────────────────────────────────────────
+        # Each entry: ("rgb" | "overlay" | "bbox", data)
+        layers: dict[str, tuple] = {}
+
+        if self.rgb is not None:
+            rgb = self.rgb.float()
+            if rgb.max() > 1.5:
+                rgb = rgb / 255.0
+            layers["rgb"] = ("rgb", rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy())
+
+        if self.fo_mask is not None:
+            m = self.fo_mask.float().cpu().numpy()
+            ov = np.zeros((*m.shape, 4), dtype=np.float32)
+            ov[..., 1] = 0.9       # green
+            ov[..., 3] = m * 0.5
+            layers["fo_mask"] = ("overlay", ov)
+
+        if self.depth is not None:
+            import matplotlib.cm as _cm
+            d = self.depth.float().cpu().numpy()
+            d = (d - d.min()) / (d.max() - d.min() + 1e-8)
+            ov = _cm.plasma(d).astype(np.float32)   # (H, W, 4)
+            ov[..., 3] = 0.6
+            layers["depth"] = ("overlay", ov)
+
+        if self.depth_mask is not None:
+            dm = self.depth_mask.float().cpu().numpy()
+            ov = np.zeros((*dm.shape, 4), dtype=np.float32)
+            ov[..., 2] = 0.9       # blue
+            ov[..., 3] = dm * 0.4
+            layers["depth_mask"] = ("overlay", ov)
+
+        if self.mask is not None:
+            fm = self.mask.float().cpu().numpy()
+            ov = np.zeros((*fm.shape, 4), dtype=np.float32)
+            ov[..., 0] = 1.0; ov[..., 1] = 0.55   # orange
+            ov[..., 3] = fm * 0.4
+            layers["frame_mask"] = ("overlay", ov)
+
+        if self.cam_bbox2d is not None:
+            x1, y1, x2, y2 = self.cam_bbox2d.cpu().tolist()
+            layers["cam_bbox2d"] = ("bbox", (x1, y1, x2, y2))
+
+        if not layers:
+            return None
+
+        label_order = list(layers.keys())
+        active      = {k: True for k in label_order}
+
+        def _hw() -> tuple[int, int]:
+            for kind, data in layers.values():
+                if kind in ("rgb", "overlay"):
+                    return data.shape[:2]
+            return 480, 640
+
+        def _compose_numpy() -> np.ndarray:
+            H, W = _hw()
+            canvas = np.zeros((H, W, 3), dtype=np.float32)
+            if "rgb" in layers and active["rgb"]:
+                canvas = layers["rgb"][1].copy()
+            elif "rgb" in layers:
+                canvas[:] = 0.15        # dark grey placeholder
+
+            for k in label_order:
+                if k == "rgb" or not active[k]:
+                    continue
+                kind, data = layers[k]
+                if kind == "overlay":
+                    alpha = data[..., 3:4]
+                    canvas = canvas * (1 - alpha) + data[..., :3] * alpha
+                # bbox is handled via matplotlib patch — not blended into canvas
+
+            return np.clip(canvas, 0, 1)
+
+        if show:
+            import matplotlib.pyplot as plt
+            import matplotlib.patches as mpatches
+            from matplotlib.widgets import CheckButtons
+
+            fig, ax = plt.subplots(figsize=(9, 6))
+            fig.subplots_adjust(bottom=0.14)
+            ax.axis("off")
+            cat_str = str(self.category) if self.category is not None else ""
+            title   = getattr(self, "frame_id", "")
+            if cat_str:
+                title = f"{title}  [{cat_str}]"
+            ax.set_title(title, fontsize=9)
+
+            im = ax.imshow(_compose_numpy())
+            bbox_patch: list = []
+            cat_text = (
+                ax.text(
+                    0.01, 0.97, cat_str,
+                    transform=ax.transAxes,
+                    fontsize=12, fontweight="bold",
+                    color="white", va="top", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.55),
+                )
+                if cat_str else None
+            )
+
+            def _redraw(_label: str = "") -> None:
+                im.set_data(_compose_numpy())
+                for p in bbox_patch:
+                    p.remove()
+                bbox_patch.clear()
+                if "cam_bbox2d" in layers and active.get("cam_bbox2d", True):
+                    x1, y1, x2, y2 = layers["cam_bbox2d"][1]
+                    p = mpatches.Rectangle(
+                        (x1, y1), x2 - x1, y2 - y1,
+                        linewidth=2, edgecolor="lime", facecolor="none",
+                    )
+                    ax.add_patch(p)
+                    bbox_patch.append(p)
+                fig.canvas.draw_idle()
+
+            _redraw()
+
+            ax_cb = fig.add_axes([0.05, 0.01, 0.9, 0.10])
+            check = CheckButtons(ax_cb, label_order, actives=[True] * len(label_order))
+
+            def on_toggle(label: str) -> None:
+                active[label] = not active[label]
+                _redraw(label)
+
+            check.on_clicked(on_toggle)
+            plt.show()
+
+        canvas = _compose_numpy()
+        return torch.from_numpy(canvas).permute(2, 0, 1)
+
 
 @dataclass
 class FrameObjectBatch:
