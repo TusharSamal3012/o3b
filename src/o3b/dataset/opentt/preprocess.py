@@ -519,12 +519,23 @@ def postprocess_scores(db_path: Path) -> None:
                 new_left = 0  # valid game-reset
                 new_right = 0  # valid game-reset
             
+            non_monotonic = (
+                (p_left is not None and new_left is not None and new_left != p_left and new_left
+                    not in (p_left, p_left + 1)) or
+                (p_right is not None and new_right is not None and new_right != p_right and new_right
+                    not in (p_right, p_right + 1))
+            )
+
+            if not game_reset and non_monotonic:
+                new_left = p_left
+                new_right = p_right
+
             if new_left != left or new_right != right:
                 updates.append((new_left, new_right, new_left, new_right, video_name, frame_idx))
 
             prev[video_name] = (
-                new_left  if new_left  is not None else p_left,
-                new_right if new_right is not None else p_right,
+                new_left  if new_left  is not None and new_right is not None else p_left,
+                new_right if new_left  is not None and new_right is not None else p_right,
             )
 
         if updates:

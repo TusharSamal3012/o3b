@@ -27,8 +27,8 @@ split: all   # train | test | all
 scene_length: 64   # number of frames per returned Scene clip
 # otherwise it is oto fiew 
 
-#filter_count_max: 20
-#filter_score_zero: true # drop clips whose middle frame has a known scoreboard with both scores == 0
+filter_count_max: 40
+filter_score_zero: true # drop clips whose middle frame has a known scoreboard with both scores == 0
 
 extra:
   frame_stride: 16    # step between consecutive frames within a clip (120fps / 4 = 30 effective fps)

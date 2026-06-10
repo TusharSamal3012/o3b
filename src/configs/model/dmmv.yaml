@@ -19,6 +19,6 @@ num_blocks: 8
 
 # If true, use raw 768-dim SDDINO multi-view features instead of the
 # 512-dim DiffusionNet-refined output (out_dim becomes 768).
-use_mv_features: false
+use_mv_features: true
 
 freeze: true
