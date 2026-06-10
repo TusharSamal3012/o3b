@@ -20,6 +20,7 @@ class Scene:
     frames:        list[Frame]            = field(default_factory=list)
     events:        Optional[list]         = None  # T elements: str event label or None
     scoreboards:   Optional[list]         = None  # T elements: {"bbox","score_left","score_right"} or None
+    balls:         Optional[list]         = None  # T elements: (x, y) int tuple or None
 
     @staticmethod
     def from_frames(frames: list[Frame], scene_id: str = "", events: Optional[list] = None) -> Scene:
@@ -225,6 +226,7 @@ class SceneBatch:
     feats:         Optional[Tensor]  = None  # (B, T_max, F)
     events:        Optional[list]    = None  # B x T_max lists of str|None (padded with None)
     scoreboards:   Optional[list]    = None  # B x T_max lists of dict|None (padded with None)
+    balls:         Optional[list]    = None  # B x T_max lists of (x,y)|None (padded with None)
 
 
 def collate_scenes(scenes: list[Scene]) -> SceneBatch:
@@ -281,4 +283,5 @@ def collate_scenes(scenes: list[Scene]) -> SceneBatch:
         feats        = feats,
         events       = _pad_list("events"),
         scoreboards  = _pad_list("scoreboards"),
+        balls        = _pad_list("balls"),
     )

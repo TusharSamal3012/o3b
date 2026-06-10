@@ -159,9 +159,14 @@ class MeshFeaturizer(nn.Module):
             print("computing XYZ pos enc and HKS took", time.time() - start_s)
 
         start_s = time.time()
-        # sparse mm doesnt work with half
-        in_features = torch.cat([mv_features, pos_enc, hks], dim=1) # [V, diffusion_in_channels]
-        out_features = self.extractor_3d(in_features, massvec, L_list, evals, evecs, gradX, gradY, edges=None, faces=None)
+        # sparse mm and large HKS values (can reach 1e7) overflow fp16 — disable autocast
+        in_features = torch.cat([mv_features.float(), pos_enc.float(), hks.float()], dim=1) # [V, diffusion_in_channels]
+        with torch.autocast("cuda", enabled=False):
+            out_features = self.extractor_3d(
+                in_features, massvec.float(), L_list.float(),
+                evals.float(), evecs.float(), gradX.float(), gradY.float(),
+                edges=None, faces=None,
+            )
         if os.environ.get("TIMEIT", False):
             print("diffusion net forward took", time.time() - start_s, "with", mv_features.shape[0], "vertices")
         # normalize

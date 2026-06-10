@@ -20,7 +20,9 @@ Directory layout after fetch():
   {path_raw}/
       annotations/
           train/  game_1.json … game_5.json
+                  game_1_ball.json … game_5_ball.json
           test/   test_1.json … test_7.json
+                  test_1_ball.json … test_7_ball.json
       videos/
           train/  game_1.mp4 … game_5.mp4
           test/   test_1.mp4 … test_7.mp4
@@ -39,6 +41,7 @@ from __future__ import annotations
 import json
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -100,6 +103,7 @@ class OpenTT(ConfigurableDataset):
 
     def _setup(self) -> None:
         self._annotations: dict[str, dict[int, str]] = {}
+        self._balls: dict[str, dict[int, Optional[tuple]]] = {}
         self._clips: list[dict] = []
 
         frame_stride: int = int(self.cfg.extra.get("frame_stride", 1))
@@ -157,6 +161,15 @@ class OpenTT(ConfigurableDataset):
                 raw = json.load(fh)
             self._annotations[name] = {int(k): v for k, v in raw.items()}
 
+            ball_file = self._path_annotations / split / f"{name}_ball.json"
+            if ball_file.exists():
+                with ball_file.open() as fh:
+                    raw_ball = json.load(fh)
+                self._balls[name] = {
+                    int(k): (None if v.get("x", -1) == -1 else (int(v["x"]), int(v["y"])))
+                    for k, v in raw_ball.items()
+                }
+
             n_frames = manifest.get(name) or _video_frame_count(video_file)
             window   = scene_len * frame_stride
 
@@ -190,11 +203,15 @@ class OpenTT(ConfigurableDataset):
                 for fi in clip["indices"]
             ]
 
+        ball_anno = self._balls.get(name, {})
+        balls = [ball_anno.get(fi) for fi in clip["indices"]]
+
         return Scene(
             scene_id    = f"{name}_{clip['indices'][0]:07d}",
             rgbs        = rgbs,
             events      = events,
             scoreboards = scoreboards,
+            balls       = balls,
         )
 
     # ── collation ──────────────────────────────────────────────────────────────
@@ -289,6 +306,31 @@ class OpenTT(ConfigurableDataset):
                 print(f"  fetch {src}")
                 urllib.request.urlretrieve(src, dest, _progress)
                 print()
+
+        print("\n=== OpenTT: fetching ball annotations ===")
+        for split, names in [("train", _TRAIN_NAMES), ("test", _TEST_NAMES)]:
+            anno_dir = path_raw / "annotations" / split
+            anno_dir.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                dest = anno_dir / f"{name}_ball.json"
+                if dest.exists():
+                    print(f"  skip  annotations/{split}/{name}_ball.json  (already exists)")
+                    continue
+                src = f"{_VIDEO_BASE}/{name}.zip"
+                tmp = anno_dir / f"{name}_ball.zip.tmp"
+                print(f"  fetch {src}  (extracting ball_markup.json)")
+                try:
+                    urllib.request.urlretrieve(src, tmp, _progress)
+                    print()
+                    with zipfile.ZipFile(tmp) as zf:
+                        with zf.open("ball_markup.json") as bf:
+                            ball_data = json.load(bf)
+                    with dest.open("w") as fh:
+                        json.dump(ball_data, fh)
+                    print(f"  saved → {dest}")
+                finally:
+                    if tmp.exists():
+                        tmp.unlink()
 
         print("\n=== OpenTT: fetching videos ===")
         for split, names in [("train", _TRAIN_NAMES), ("test", _TEST_NAMES)]:
@@ -441,12 +483,16 @@ class OpenTT(ConfigurableDataset):
                 for fi in sampled
             ] if dataset._scoreboards else [None] * len(sampled)
 
+            ball_anno = dataset._balls.get(name, {})
+            balls = [ball_anno.get(fi) for fi in sampled]
+
             if frames_per_scene is not None:
                 _viz_grid(
                     scene_id      = f"{name}_{indices[0]:07d}",
                     rgbs          = rgbs,
                     events        = events,
                     scoreboards   = scoreboards,
+                    balls         = balls,
                     frame_indices = sampled,
                     video_fps     = 120.0,
                 )
@@ -456,6 +502,7 @@ class OpenTT(ConfigurableDataset):
                     rgbs        = rgbs,
                     events      = events,
                     scoreboards = scoreboards,
+                    balls       = balls,
                     fps         = max(1.0, 120.0 / ds_frame_stride),
                 )
 
@@ -467,6 +514,7 @@ def _viz_grid(
     rgbs: "torch.Tensor",
     events: list,
     scoreboards: list,
+    balls: "list | None" = None,
     frame_indices: "list[int] | None" = None,
     video_fps: float = 1.0,
 ) -> None:
@@ -549,6 +597,14 @@ def _viz_grid(
             fi_str = f"{int(secs // 60)}:{secs % 60:05.2f}"
             _put(fi_str, margin, th - margin, (200, 200, 200))
 
+        ball = balls[t] if (balls and t < len(balls)) else None
+        if ball is not None:
+            bx = int(ball[0] * tile_w / orig_w)
+            by = int(ball[1] * tile_h / orig_h)
+            radius = max(4, int(min(tile_w, tile_h) * 0.015))
+            cv2.circle(tile, (bx, by), radius + 1, (0, 0, 0),   -1, cv2.LINE_AA)
+            cv2.circle(tile, (bx, by), radius,     (0, 255, 255), -1, cv2.LINE_AA)
+
         tiles.append(tile)
 
     # Pad to fill the grid
@@ -576,6 +632,7 @@ def _viz_scene(
     rgbs: "torch.Tensor",
     events: list,
     scoreboards: list,
+    balls: "list | None" = None,
     fps: float = 30.0,
 ) -> None:
     """Play a single pre-loaded clip in an OpenCV window.
@@ -655,6 +712,12 @@ def _viz_scene(
                         font, scale * 0.75, (0, 0, 0), thickness + 2, cv2.LINE_AA)
             cv2.putText(display, ev_str, ((W - ev_tw) // 2, y_pos + line_h),
                         font, scale * 0.75, (220, 220, 80), thickness, cv2.LINE_AA)
+
+        ball = balls[t] if (balls and t < len(balls)) else None
+        if ball is not None:
+            radius = max(6, int(min(W, H) * 0.012))
+            cv2.circle(display, (ball[0], ball[1]), radius + 2, (0, 0, 0),    -1, cv2.LINE_AA)
+            cv2.circle(display, (ball[0], ball[1]), radius,     (0, 255, 255), -1, cv2.LINE_AA)
 
         cv2.setWindowTitle(win, f"{scene_id}  |  frame {t + 1}/{T}  |  L:{l_str}  R:{r_str}")
         cv2.imshow(win, display)

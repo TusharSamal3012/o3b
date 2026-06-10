@@ -1,10 +1,10 @@
 class_name: DenseMatcher
 
 # FeatUp upsampler checkpoint (parsed for imsize / channelnorm / unitnorm / rotinv).
-pretrained_upsampler_path: "checkpoints/featup_imsize=384_channelnorm=False_unitnorm=False_rotinv=True/final.ckpt"
+pretrained_upsampler_path: "checkpoints/featup_imsize=384_channelnorm=False_unitnorm=False_rotinv=True/exp_jbu_imsize=384_steps=10000_channelnorm=False_unitnorm=False_rotinv=True/epoch=0-step=10000.ckpt"
 
 # Directory containing SDDINO aggregation network weights (best_384.PTH etc.)
-aggre_net_weights_folder: "checkpoints/SDDINO_weights"
+aggre_net_weights_folder: "checkpoints/SD_DINO_WEIGHTS"
 
 # Trained DiffusionNet checkpoint (leave empty to skip loading, useful for ablations).
 diffusionnet_ckpt_path: "checkpoints/exp_mvmatcher_imsize=384_width=512_nviews=3x1_wrecon=10.0_cutprob=0.5_blocks=8_release_jitter=0.0/final.ckpt"

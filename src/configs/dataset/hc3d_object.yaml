@@ -16,3 +16,5 @@ mesh_type: "mc16_vuni4_r256_fdm"    # DenseMatcher (SDDINO, 768-dim) — set che
 # o3b dataset fetch -d hc3d_object -p slurm  
 # o3b dataset index -d hc3d_object -p slurm
 # o3b dataset viz -d hc3d_object -p slurm
+
+# VIZ_DIR=./tmp/dm_viz o3b dataset viz -d hc3d_object

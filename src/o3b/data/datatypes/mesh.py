@@ -39,6 +39,43 @@ class Mesh:
             mesh.vert_feats = torch.load(feats_path, weights_only=True)
         return mesh
 
+    def to_pytorch3d(self, device=None):
+        """Convert to a PyTorch3D ``Meshes`` object (single mesh, batch size 1).
+
+        Texture priority:
+          1. ``vert_colors`` (V, 3) → ``Textures(verts_rgb=[...])``.
+          2. ``texture`` (3, H, W) + ``verts_uvs`` → ``TexturesUV``.
+          3. Fallback: uniform grey ``verts_rgb``.
+        """
+        from pytorch3d.structures.meshes import Meshes
+        from pytorch3d.renderer.mesh.textures import Textures, TexturesUV
+
+        verts = self.verts.float()
+        faces = self.faces.long()
+        if device is not None:
+            verts = verts.to(device)
+            faces = faces.to(device)
+
+        if self.vert_colors is not None:
+            colors = self.vert_colors.float().clamp(0, 1).to(verts.device)
+            textures = Textures(verts_rgb=[colors])
+        elif self.texture is not None and self.verts_uvs is not None:
+            tex_map = self.texture.float().permute(1, 2, 0).to(verts.device)  # (H, W, 3)
+            uvs = self.verts_uvs.float().to(verts.device)
+            # Mesh stores verts_uvs in image convention (v=0 at top).
+            # PyTorch3D TexturesUV expects OpenGL convention (v=0 at bottom):
+            # it maps v via lerp([1,-1], uv) so v=0→bottom row, v=1→top row.
+            uvs = torch.stack([uvs[:, 0], 1.0 - uvs[:, 1]], dim=1)
+            # If faces_uvs is absent, UV index == vertex index → reuse faces.
+            f_uvs = (self.faces_uvs.long() if self.faces_uvs is not None else faces).to(verts.device)
+            textures = TexturesUV(maps=[tex_map], faces_uvs=[f_uvs], verts_uvs=[uvs])
+        else:
+            V = verts.shape[0]
+            grey = torch.full((V, 3), 0.5, dtype=torch.float32, device=verts.device)
+            textures = Textures(verts_rgb=[grey])
+
+        return Meshes(verts=[verts], faces=[faces], textures=textures)
+
     @classmethod
     def load_or_convert(
         cls,
