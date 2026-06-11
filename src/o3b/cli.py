@@ -341,10 +341,12 @@ def _run_platform_setup(args):
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    install_diff3f = cfg.get("install_diff3f", False)
+    install_diff3f       = cfg.get("install_diff3f", False)
+    install_densematcher = cfg.get("install_densematcher", False)
     branch         = cfg.get("branch", "main")
     pull           = cfg.get("pull", True)
-    pull_submodules = cfg.get("pull_submodules", True)
+    pull_submodules  = cfg.get("pull_submodules", True)
+    skip_submodules  = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
     username       = cfg.get("username", "")
     path_home      = cfg.get("path_home", path_ws)
 
@@ -408,13 +410,15 @@ def _run_platform_setup(args):
         "PATH_CUDA":       path_cuda,
         "PYTHON_VERSION":  python_version,
         "TORCH_VERSION":   torch_version,
-        "INSTALL_DIFF3F":  "true" if install_diff3f else "false",
+        "INSTALL_DIFF3F":        "true" if install_diff3f else "false",
+        "INSTALL_DENSEMATCHER":  "true" if install_densematcher else "false",
         "REPO_URL":        repo_url,   # housecorr3d HTTPS URL with token
         "REPO_NAME":       repo_name,  # derived from remote URL, e.g. HouseCorr3Dv2
         "GITHUB_TOKEN":    token,
         "BRANCH":          branch,
         "PULL":            "true" if pull else "false",
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
+        "SKIP_SUBMODULES": skip_submodules,
         "HTTP_PROXY":      _proxy,
         "HTTPS_PROXY":     _proxy,
         "http_proxy":      _proxy,
@@ -686,11 +690,13 @@ def _platform_srun_context(platform: str):
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    install_diff3f = "true" if cfg.get("install_diff3f", False) else "false"
+    install_diff3f       = "true" if cfg.get("install_diff3f", False) else "false"
+    install_densematcher = "true" if cfg.get("install_densematcher", False) else "false"
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
     pull_subs      = str(cfg.get("pull_submodules", True)).lower()
+    skip_subs      = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
 
     cuda_tag  = "cu" + os.path.basename(path_cuda).replace("cuda-", "").replace(".", "")
     py_tag    = "py" + python_version.replace(".", "")
@@ -748,12 +754,14 @@ def _platform_srun_context(platform: str):
         f",PYTHON_VERSION={python_version}"
         f",TORCH_VERSION={torch_version}"
         f",INSTALL_DIFF3F={install_diff3f}"
+        f",INSTALL_DENSEMATCHER={install_densematcher}"
         f",REPO_URL={repo_url}"
         f",REPO_NAME={repo_name}"
         f",SETUP={setup}"
         f",BRANCH={branch}"
         f",PULL={pull}"
         f",PULL_SUBMODULES={pull_subs}"
+        f",SKIP_SUBMODULES={skip_subs}"
         f",GITHUB_TOKEN={token}"
         f",CUDA_HOME={path_cuda}"
         f",CUDACXX={path_cuda}/bin/nvcc"
@@ -796,7 +804,20 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
             f'    if [ -n "${{GITHUB_TOKEN:-}}" ]; then',
             f'        git config --global url."https://${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"',
             f'    fi',
-            f'    git -C {repo_path} submodule update --init --recursive',
+            f'    if [ -z "${{SKIP_SUBMODULES:-}}" ]; then',
+            f'        git -C {repo_path} submodule update --init --recursive',
+            f'    else',
+            f'        git -C {repo_path} submodule init',
+            f"        for sub in $(git -C {repo_path} submodule status | awk '{{print $2}}'); do",
+            f'            _skip=false',
+            f'            for s in ${{SKIP_SUBMODULES}}; do',
+            f'                [ "$sub" = "$s" ] && _skip=true && break',
+            f'            done',
+            f'            if [ "$_skip" = "false" ]; then',
+            f'                git -C {repo_path} submodule update --init --recursive -- "$sub"',
+            f'            fi',
+            f'        done',
+            f'    fi',
             f'fi',
         ]
     if venv_path:
@@ -1087,7 +1108,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    install_diff3f = "true" if cfg.get("install_diff3f", False) else "false"
+    install_diff3f       = "true" if cfg.get("install_diff3f", False) else "false"
+    install_densematcher = "true" if cfg.get("install_densematcher", False) else "false"
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
@@ -1128,7 +1150,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
         "PATH_CUDA":       path_cuda,
         "PYTHON_VERSION":  python_version,
         "TORCH_VERSION":   torch_version,
-        "INSTALL_DIFF3F":  install_diff3f,
+        "INSTALL_DIFF3F":        install_diff3f,
+        "INSTALL_DENSEMATCHER":  install_densematcher,
         "REPO_URL":        repo_url,
         "REPO_NAME":       repo_name,
         "SETUP":           setup,

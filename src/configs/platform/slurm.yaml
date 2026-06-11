@@ -10,8 +10,12 @@ restart_upon_fail: True
 branch: main
 pull: True
 pull_submodules: True
+skip_submodules:
+  - third_party/od3d
 
 setup: False
+install_diff3f: False
+install_densematcher: True
 
 path_ws: /work/dlclarge1/sommerl-od3d
 
