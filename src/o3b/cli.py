@@ -411,6 +411,7 @@ def _run_platform_setup(args):
         "INSTALL_DIFF3F":  "true" if install_diff3f else "false",
         "REPO_URL":        repo_url,   # housecorr3d HTTPS URL with token
         "REPO_NAME":       repo_name,  # derived from remote URL, e.g. HouseCorr3Dv2
+        "GITHUB_TOKEN":    token,
         "BRANCH":          branch,
         "PULL":            "true" if pull else "false",
         "PULL_SUBMODULES": "true" if pull_submodules else "false",
@@ -753,6 +754,7 @@ def _platform_srun_context(platform: str):
         f",BRANCH={branch}"
         f",PULL={pull}"
         f",PULL_SUBMODULES={pull_subs}"
+        f",GITHUB_TOKEN={token}"
         f",CUDA_HOME={path_cuda}"
         f",CUDACXX={path_cuda}/bin/nvcc"
     )
@@ -791,6 +793,9 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
             f'    git -C {repo_path} pull',
             f'fi',
             f'if [ "${{PULL_SUBMODULES:-false}}" = "true" ]; then',
+            f'    if [ -n "${{GITHUB_TOKEN:-}}" ]; then',
+            f'        git config --global url."https://${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"',
+            f'    fi',
             f'    git -C {repo_path} submodule update --init --recursive',
             f'fi',
         ]
