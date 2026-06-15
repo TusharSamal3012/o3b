@@ -1336,9 +1336,11 @@ def _run_bench_rrun(args) -> None:
     """Submit each benchmark/ablation run as a separate sbatch job."""
     import shlex
 
+    from omegaconf import OmegaConf as _OC
+
     platform = args.platform or "slurm"
     bench_stem = args.benchmark.stem
-    deps_override = [d.strip() for d in args.deps.split(",")] if getattr(args, "deps", None) else None
+    cli_deps = [d.strip() for d in args.deps.split(",")] if getattr(args, "deps", None) else None
 
     if args.ablation:
         combos = _ablation_combinations(args.ablation)
@@ -1349,6 +1351,21 @@ def _run_bench_rrun(args) -> None:
         combos = [()]
 
     for combo in combos:
+        # collect platform.deps from ablation YAMLs (union across all files in combo)
+        ablation_deps: list | None = None
+        for f in combo:
+            try:
+                acfg = _OC.load(f)
+                file_deps = _OC.select(acfg, "platform.deps", default=None)
+                if file_deps is not None:
+                    if ablation_deps is None:
+                        ablation_deps = []
+                    ablation_deps.extend(list(file_deps))
+            except Exception:
+                pass
+        # precedence: CLI -d > ablation platform.deps > platform config deps
+        effective_deps = cli_deps if cli_deps is not None else ablation_deps
+
         parts = ["o3b", "bench", "run",
                  "-b", _repo_rel(args.benchmark),
                  "-p", platform]
@@ -1367,7 +1384,7 @@ def _run_bench_rrun(args) -> None:
             continue
 
         print(f"  Submitting: {remote_cmd}")
-        _run_bench_sbatch_cmd(platform, remote_cmd, job_name, deps_override=deps_override)
+        _run_bench_sbatch_cmd(platform, remote_cmd, job_name, deps_override=effective_deps)
         print(f"  → submitted")
 
 
