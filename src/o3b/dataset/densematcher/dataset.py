@@ -13,6 +13,7 @@ from o3b.dataset.densematcher.enum import DENSEMATCHER_CATEGORIES
 _MESH_EXTS = {".obj", ".ply", ".glb", ".gltf", ".stl", ".fbx"}
 
 _DEFAULT_URL = "https://uc5bd5477daf057f29a9be114ebe.dl.dropboxusercontent.com/zip_download_get/Cl3YTCzPess6IGcEaFENNRsKiVD3tlplOVlH5WciuMYDo5ZPPB1-fC1BvJllNFGOUkkL0oPz9C-MwtQMyxToNZ-vPeKeJJ4-eVZ62tA_CTxkMQ?_download_id=568191518838943791998429792307572148146857030313156947310723491&_log_download_success=1&_notify_domain=www.dropbox.com&dl=1"
+# note: could be that this url changes all the time for densematcher. 
 
 @register_dataset("DenseMatcher")
 class DenseMatcher(ConfigurableDataset):
