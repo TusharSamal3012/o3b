@@ -350,8 +350,10 @@ def _run_platform_setup(args):
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    install_diff3f       = cfg.get("install_diff3f", False)
-    install_densematcher = cfg.get("install_densematcher", False)
+    deps                 = list(cfg.get("deps", []) or [])
+    deps_tag             = "_".join(sorted(deps)) if deps else ""
+    install_diff3f       = cfg.get("install_diff3f", False) or "diff3f" in deps
+    install_densematcher = cfg.get("install_densematcher", False) or "densematcher" in deps
     branch         = cfg.get("branch", "main")
     pull           = cfg.get("pull", True)
     pull_submodules  = cfg.get("pull_submodules", True)
@@ -421,6 +423,7 @@ def _run_platform_setup(args):
         "TORCH_VERSION":   torch_version,
         "INSTALL_DIFF3F":        "true" if install_diff3f else "false",
         "INSTALL_DENSEMATCHER":  "true" if install_densematcher else "false",
+        "DEPS_TAG":              deps_tag,
         "REPO_URL":        repo_url,   # housecorr3d HTTPS URL with token
         "REPO_NAME":       repo_name,  # derived from remote URL, e.g. HouseCorr3Dv2
         "GITHUB_TOKEN":    token,
@@ -699,8 +702,10 @@ def _platform_srun_context(platform: str):
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    install_diff3f       = "true" if cfg.get("install_diff3f", False) else "false"
-    install_densematcher = "true" if cfg.get("install_densematcher", False) else "false"
+    deps                 = list(cfg.get("deps", []) or [])
+    deps_tag             = "_".join(sorted(deps)) if deps else ""
+    install_diff3f       = "true" if (cfg.get("install_diff3f", False) or "diff3f" in deps) else "false"
+    install_densematcher = "true" if (cfg.get("install_densematcher", False) or "densematcher" in deps) else "false"
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
@@ -733,7 +738,8 @@ def _platform_srun_context(platform: str):
         repo_name = ""
 
     repo_path = f"{path_ws}/{repo_name}" if (path_ws and repo_name) else path_ws
-    venv_path = f"{repo_path}/venv_{py_tag}_{cuda_tag}_{torch_tag}" if repo_path else ""
+    _venv_suffix = f"_{deps_tag}" if deps_tag else ""
+    venv_path = f"{repo_path}/venv_{py_tag}_{cuda_tag}_{torch_tag}{_venv_suffix}" if repo_path else ""
 
     srun = (
         f"srun"
@@ -774,6 +780,7 @@ def _platform_srun_context(platform: str):
         f",GITHUB_TOKEN={token}"
         f",CUDA_HOME={path_cuda}"
         f",CUDACXX={path_cuda}/bin/nvcc"
+        f",DEPS_TAG={deps_tag}"
     )
 
     return ssh_host, srun, repo_path, venv_path, path_cuda, path_ws
@@ -1211,8 +1218,10 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    install_diff3f       = "true" if cfg.get("install_diff3f", False) else "false"
-    install_densematcher = "true" if cfg.get("install_densematcher", False) else "false"
+    deps                 = list(cfg.get("deps", []) or [])
+    deps_tag             = "_".join(sorted(deps)) if deps else ""
+    install_diff3f       = "true" if (cfg.get("install_diff3f", False) or "diff3f" in deps) else "false"
+    install_densematcher = "true" if (cfg.get("install_densematcher", False) or "densematcher" in deps) else "false"
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
@@ -1245,7 +1254,8 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
         repo_name = ""
 
     repo_path = f"{path_ws}/{repo_name}" if (path_ws and repo_name) else path_ws
-    venv_path = f"{repo_path}/venv_{py_tag}_{cuda_tag}_{torch_tag}" if repo_path else ""
+    _venv_suffix = f"_{deps_tag}" if deps_tag else ""
+    venv_path = f"{repo_path}/venv_{py_tag}_{cuda_tag}_{torch_tag}{_venv_suffix}" if repo_path else ""
 
     _proxy = "http://tfproxy.informatik.intra.uni-freiburg.de:8080"
     env_vars = {
@@ -1255,6 +1265,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
         "TORCH_VERSION":   torch_version,
         "INSTALL_DIFF3F":        install_diff3f,
         "INSTALL_DENSEMATCHER":  install_densematcher,
+        "DEPS_TAG":              deps_tag,
         "REPO_URL":        repo_url,
         "REPO_NAME":       repo_name,
         "SETUP":           setup,
