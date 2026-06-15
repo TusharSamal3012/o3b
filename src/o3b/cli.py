@@ -209,6 +209,15 @@ def _build_platform_parser(sub):
         help="Platform name matching a config in configs/platform/ (default: slurm)",
     )
 
+    p_setupi = plat_sub.add_parser(
+        "setupi",
+        help="Open an interactive shell, copy setup script, and print it for manual execution",
+    )
+    p_setupi.add_argument(
+        "-p", "--platform", default="slurm", metavar="PLATFORM",
+        help="Platform name matching a config in configs/platform/ (default: slurm)",
+    )
+
     p_run = plat_sub.add_parser(
         "run",
         help="Run a command on a compute node (non-interactive srun)",
@@ -848,6 +857,69 @@ def _run_platform_runi(args):
     subprocess.run(["ssh", "-t", ssh_host, srun])
 
 
+def _run_platform_setupi(args):
+    """Interactive setup: open a compute-node shell, copy setup_slurm.sh, and print it."""
+    import re
+    import subprocess
+
+    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(args.platform)
+
+    cfg, _ = _load_platform_config(args.platform)
+    username = cfg.get("username", "")
+
+    # Locate setup_slurm.sh in the outermost git repo (same logic as _run_platform_setup)
+    try:
+        submodule_root = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], text=True, cwd=Path(__file__).parent,
+        ).strip()
+        superproject = subprocess.check_output(
+            ["git", "rev-parse", "--show-superproject-working-tree"], text=True, cwd=submodule_root,
+        ).strip()
+        local_repo_root = superproject if superproject else submodule_root
+    except subprocess.CalledProcessError:
+        local_repo_root = str(Path.cwd())
+
+    setup_script_local = Path(local_repo_root) / "setup" / "setup_slurm.sh"
+    if not setup_script_local.is_file():
+        raise FileNotFoundError(f"Setup script not found: {setup_script_local}")
+
+    remote_setup = f"{path_ws}/setup_slurm.sh" if path_ws else "~/setup_slurm.sh"
+
+    def _scp(local, remote):
+        target = f"{ssh_host}:{remote}"
+        if username:
+            target = f"{username}@{ssh_host}:{remote}"
+        print(f"Copying {local} → {target}")
+        subprocess.run(["scp", str(local), target], check=True)
+
+    _scp(setup_script_local, remote_setup)
+
+    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws)
+    init_lines += [
+        "",
+        f'echo "================================================================"',
+        f'echo "  Setup script : {remote_setup}"',
+        f'echo "  To execute   : bash {remote_setup}"',
+        f'echo "================================================================"',
+        f'echo ""',
+        f'cat {remote_setup}',
+        f'echo ""',
+        f'echo "================================================================"',
+        f'echo "  Run: bash {remote_setup}"',
+        f'echo "================================================================"',
+    ]
+
+    remote_init = f"{path_ws}/.od3d_setupi_init" if path_ws else "~/.od3d_setupi_init"
+    subprocess.run(
+        ["ssh", ssh_host, f"cat > {remote_init}"],
+        input="\n".join(init_lines), text=True, check=True,
+    )
+
+    srun += f" --pty bash --init-file {remote_init}"
+    print(f"Opening interactive setup session on {ssh_host}…")
+    subprocess.run(["ssh", "-t", ssh_host, srun])
+
+
 def _run_platform_run_cmd(platform: str, command: str) -> None:
     import subprocess
 
@@ -928,6 +1000,8 @@ def _run_platform(args):
         _run_platform_overview(args)
     elif args.platform_command == "runi":
         _run_platform_runi(args)
+    elif args.platform_command == "setupi":
+        _run_platform_setupi(args)
     elif args.platform_command == "run":
         _run_platform_run(args)
     elif args.platform_command == "stop":
