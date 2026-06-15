@@ -8,10 +8,10 @@ mesh_type: "default"
 
 
 
-# o3b dataset fetch -d densematcher_object
-# o3b dataset index -d densematcher_object
-# o3b dataset viz   -d densematcher_object
+# o3b dataset fetch -d dm_object
+# o3b dataset index -d dm_object
+# o3b dataset viz   -d dm_object
 
-# o3b dataset fetch -d densematcher_object -p slurm
-# o3b dataset index -d densematcher_object -p slurm
-# o3b dataset viz   -d densematcher_object -p slurm
+# o3b dataset fetch -d dm_object -p slurm
+# o3b dataset index -d dm_object -p slurm
+# o3b dataset viz   -d dm_object -p slurm

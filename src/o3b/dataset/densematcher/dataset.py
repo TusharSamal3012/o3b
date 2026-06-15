@@ -220,17 +220,21 @@ class DenseMatcher(ConfigurableDataset):
             tmp_path.unlink(missing_ok=True)
 
     @classmethod
-    def index(cls, cfg, *, db: Optional[Path] = None) -> None:
+    def index(cls, cfg, *, db: Optional[Path] = None, remove: bool = False, max_index: Optional[int] = None, **_) -> None:
         if cfg.item_type not in (ItemType.OBJECT, ItemType.OBJECT_PAIR):
             print(f"ERROR: item_type '{cfg.item_type}' indexing is not implemented.", file=sys.stderr)
             sys.exit(1)
         if cfg.item_type == ItemType.OBJECT_PAIR:
-            cls._index_object_pairs(cfg, db=db)
+            cls._index_object_pairs(cfg, db=db, remove=remove)
             return
 
         path_raw        = cls._path_raw(cfg)
         path_preprocess = cls._path_preprocess(cfg)
         db_path         = db or path_preprocess / "index.db"
+
+        if remove and db_path.exists():
+            print(f"Removing existing index: {db_path}")
+            db_path.unlink()
 
         print(f"path_raw        : {path_raw}")
         print(f"path_preprocess : {path_preprocess}")
@@ -271,6 +275,8 @@ class DenseMatcher(ConfigurableDataset):
                     "category":  category,
                     "subset":    subset_by_id.get(oid),
                 })
+        if max_index is not None:
+            mesh_entries = mesh_entries[:max_index]
         print(f"  found {len(mesh_entries)} object(s)")
 
         kpts_root = path_preprocess / "obj_kpts3d"
@@ -327,9 +333,13 @@ class DenseMatcher(ConfigurableDataset):
         print(f"\nDone. {len(mesh_entries)} object(s) indexed -> {db_path}")
 
     @classmethod
-    def _index_object_pairs(cls, cfg, *, db: Optional[Path] = None) -> None:
+    def _index_object_pairs(cls, cfg, *, db: Optional[Path] = None, remove: bool = False) -> None:
         path_preprocess = cls._path_preprocess(cfg)
         db_path = db or path_preprocess / "index.db"
+
+        if remove and db_path.exists():
+            print(f"Removing existing index: {db_path}")
+            db_path.unlink()
 
         if not db_path.exists():
             print(f"ERROR: {db_path} not found. Run 'index' with item_type=object first.", file=sys.stderr)
