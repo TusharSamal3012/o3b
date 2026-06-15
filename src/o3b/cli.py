@@ -1118,6 +1118,11 @@ def _build_bench_parser(sub):
 
     p_rrun = bench_sub.add_parser("rrun", help="Submit benchmark(s) as remote jobs via o3b platform run")
     _add_bench_args(p_rrun)
+    p_rrun.add_argument(
+        "-d", "--deps", default=None, metavar="DEPS",
+        help="Comma-separated dep sets that override the platform config's deps field "
+             "(e.g. -d diff3f or -d densematcher,diff3f). Controls venv selection.",
+    )
 
 
 def _run_bench(args) -> None:
@@ -1203,7 +1208,7 @@ def _run_bench_run(args) -> None:
         _run_bench_run_with_cfg({**run_raw, "dataset": ds_merged}, run_name)
 
 
-def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
+def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_override: list | None = None) -> None:
     """Upload a run script + sbatch wrapper and submit via sbatch."""
     import os, re, subprocess
     from omegaconf import OmegaConf
@@ -1218,7 +1223,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str) -> None:
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
     python_version = str(cfg.get("python_version", "3.10"))
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
-    deps                 = list(cfg.get("deps", []) or [])
+    deps                 = deps_override if deps_override is not None else list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
     install_diff3f       = "true" if (cfg.get("install_diff3f", False) or "diff3f" in deps) else "false"
     install_densematcher = "true" if (cfg.get("install_densematcher", False) or "densematcher" in deps) else "false"
@@ -1333,6 +1338,7 @@ def _run_bench_rrun(args) -> None:
 
     platform = args.platform or "slurm"
     bench_stem = args.benchmark.stem
+    deps_override = [d.strip() for d in args.deps.split(",")] if getattr(args, "deps", None) else None
 
     if args.ablation:
         combos = _ablation_combinations(args.ablation)
@@ -1361,7 +1367,7 @@ def _run_bench_rrun(args) -> None:
             continue
 
         print(f"  Submitting: {remote_cmd}")
-        _run_bench_sbatch_cmd(platform, remote_cmd, job_name)
+        _run_bench_sbatch_cmd(platform, remote_cmd, job_name, deps_override=deps_override)
         print(f"  → submitted")
 
 
