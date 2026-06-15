@@ -780,6 +780,8 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
     """
     lines = [
         "[ -f ~/.bashrc ] && . ~/.bashrc",
+        f"export CUDA_HOME={path_cuda}",
+        f"export CUDACXX={path_cuda}/bin/nvcc",
         f"export PATH={path_cuda}/bin:$PATH",
         f"export LD_LIBRARY_PATH={path_cuda}/lib64:${{LD_LIBRARY_PATH:-}}",
         f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
