@@ -1033,30 +1033,50 @@ def _resolve_bench_config(name_or_path: str) -> Path:
     )
 
 
-def _resolve_ablation(name_or_path: str) -> Path:
-    """Resolve an ablation name/path to a directory or single YAML file.
+def _resolve_ablation(name_or_path: str) -> list[Path]:
+    """Resolve a comma-separated list of ablation names/paths to resolved Paths.
 
-    Accepts a full/relative path (file or directory) or a short name resolved
-    against src/configs/ablation/ relative to CWD.
+    Each entry may be a full/relative path (file or directory) or a short name
+    resolved against src/configs/ablation/ relative to CWD.
     """
-    p = Path(name_or_path)
-    if p.exists():
-        return p.resolve()
-    candidate = Path.cwd() / "src" / "configs" / "ablation" / name_or_path
-    if candidate.exists():
-        return candidate
-    raise argparse.ArgumentTypeError(
-        f"Ablation not found: {name_or_path!r}\n"
-        f"  Tried: {p.resolve()}\n"
-        f"  Tried: {candidate}"
-    )
+    result = []
+    for part in name_or_path.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        p = Path(part)
+        if p.exists():
+            result.append(p.resolve())
+            continue
+        candidate = Path.cwd() / "src" / "configs" / "ablation" / part
+        if candidate.exists():
+            result.append(candidate)
+            continue
+        raise argparse.ArgumentTypeError(
+            f"Ablation not found: {part!r}\n"
+            f"  Tried: {p.resolve()}\n"
+            f"  Tried: {candidate}"
+        )
+    return result
 
 
 def _ablation_files(ablation: Path) -> list[Path]:
-    """Return sorted list of YAML files for a dir, or [ablation] for a single file."""
+    """Return sorted list of YAML files for a single dir or file."""
     if ablation.is_file():
         return [ablation]
     return sorted(ablation.glob("*.yaml"))
+
+
+def _ablation_combinations(ablations: list[Path]) -> list[tuple[Path, ...]]:
+    """Return the Cartesian product of YAML files across all ablation entries.
+
+    Each entry expands to its set of YAML files (or itself if a single file).
+    A single entry with N files → N 1-tuples; two entries with M and N files →
+    M*N 2-tuples where both configs are merged for each run.
+    """
+    import itertools
+    per_entry = [_ablation_files(a) for a in ablations]
+    return list(itertools.product(*per_entry))
 
 
 def _repo_rel(path: Path) -> str:
@@ -1082,8 +1102,8 @@ def _build_bench_parser(sub):
         )
         q.add_argument(
             "-a", "--ablation", default=None, type=_resolve_ablation, metavar="ABLATION",
-            help="Ablation dir name (src/configs/ablation/) or path to dir/file; "
-                 "each YAML is merged on top of the benchmark config and run in sequence",
+            help="Comma-separated ablation dirs/files (names resolved from src/configs/ablation/); "
+                 "each YAML across all entries is merged on top of the benchmark config and run in sequence",
         )
 
     p_run = bench_sub.add_parser("run", help="Run benchmark(s) locally")
@@ -1129,29 +1149,36 @@ def _run_bench_run(args) -> None:
     else:
         ds_base = {}
 
-    # ── collect ablation files (or a single sentinel for the no-ablation case) ─
+    # ── collect ablation combinations (Cartesian product across entries) ────────
     if args.ablation:
-        ablation_files = _ablation_files(args.ablation)
-        if not ablation_files:
-            print(f"WARNING: no YAML files found in {args.ablation}")
+        combos = _ablation_combinations(args.ablation)
+        if not combos:
+            print(f"WARNING: no YAML files found in {args.ablation!r}")
             return
     else:
-        ablation_files = [None]
+        combos = [()]  # single run with no ablation
 
-    # ── run once per ablation ─────────────────────────────────────────────────
-    for ablation_file in ablation_files:
-        if ablation_file is not None:
-            with open(ablation_file) as f:
-                ablation = yaml.safe_load(f) or {}
+    # ── run once per combination ──────────────────────────────────────────────
+    for combo in combos:
+        if combo:
+            # merge all ablation YAMLs in the combo sequentially
+            merged_ablation = OmegaConf.create({})
+            for ablation_file in combo:
+                with open(ablation_file) as f:
+                    merged_ablation = OmegaConf.merge(
+                        merged_ablation, OmegaConf.create(yaml.safe_load(f) or {})
+                    )
             run_raw = OmegaConf.to_container(
-                OmegaConf.merge(OmegaConf.create(dict(raw)), OmegaConf.create(ablation)),
+                OmegaConf.merge(OmegaConf.create(dict(raw)), merged_ablation),
                 resolve=True,
             )
+            combo_stem = "__".join(f.stem for f in combo)
             print(f"\n{'='*60}")
-            print(f"Ablation: {ablation_file.stem}")
+            print(f"Ablation: {combo_stem}")
             print(f"{'='*60}")
         else:
             run_raw = raw
+            combo_stem = None
 
         # merge benchmark/ablation dataset section on top of base dataset config
         run_ds = run_raw.get("dataset") or {}
@@ -1162,8 +1189,8 @@ def _run_bench_run(args) -> None:
 
         from datetime import datetime
         timestamp = datetime.now().strftime("%m%d_%H%M%S")
-        if ablation_file is not None:
-            run_name = f"{timestamp}__{args.benchmark.stem}__{ablation_file.stem}"
+        if combo_stem:
+            run_name = f"{timestamp}__{args.benchmark.stem}__{combo_stem}"
         else:
             run_name = f"{timestamp}__{args.benchmark.stem}"
         _run_bench_run_with_cfg({**run_raw, "dataset": ds_merged}, run_name)
@@ -1297,20 +1324,22 @@ def _run_bench_rrun(args) -> None:
     bench_stem = args.benchmark.stem
 
     if args.ablation:
-        files = _ablation_files(args.ablation)
-        if not files:
-            print(f"WARNING: no YAML files found in {args.ablation}")
+        combos = _ablation_combinations(args.ablation)
+        if not combos:
+            print(f"WARNING: no YAML files found in {args.ablation!r}")
             return
     else:
-        files = [None]
+        combos = [()]
 
-    for ablation_file in files:
+    for combo in combos:
         parts = ["o3b", "bench", "run",
                  "-b", _repo_rel(args.benchmark),
                  "-p", platform]
-        if ablation_file is not None:
-            parts += ["-a", _repo_rel(ablation_file)]
-            job_name = f"{bench_stem}__{ablation_file.stem}"
+        if combo:
+            # pass each file individually; the remote `bench run` will receive a
+            # comma-joined -a arg so its own outer-product logic runs the same combo
+            parts += ["-a", ",".join(_repo_rel(f) for f in combo)]
+            job_name = f"{bench_stem}__{'__'.join(f.stem for f in combo)}"
         else:
             job_name = bench_stem
         remote_cmd = " ".join(shlex.quote(p) for p in parts)
@@ -1320,7 +1349,7 @@ def _run_bench_rrun(args) -> None:
             print(f"  → skipping: job '{job_name}' is already pending/running on {platform}")
             continue
 
-        print(f"Submitting '{job_name}': {remote_cmd}")
+        print(f"  Submitting: {remote_cmd}")
         _run_bench_sbatch_cmd(platform, remote_cmd, job_name)
         print(f"  → submitted")
 

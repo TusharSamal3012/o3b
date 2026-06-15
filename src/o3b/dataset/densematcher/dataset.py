@@ -42,6 +42,7 @@ class DenseMatcher(ConfigurableDataset):
 
     def _setup(self) -> None:
         self._object_rows: list[dict] = []
+        self._object_rows_id: list = []
         db_path = self.path_preprocess / "index.db"
         if not db_path.exists():
             return
