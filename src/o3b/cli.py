@@ -249,6 +249,23 @@ def _build_platform_parser(sub):
         help="Skip confirmation prompt",
     )
 
+    p_queue = plat_sub.add_parser(
+        "queue",
+        help="Show partition queue with per-job resource usage (GPUs, CPUs, memory)",
+    )
+    p_queue.add_argument(
+        "-p", "--platform", default="slurm", metavar="PLATFORM",
+        help="Platform name matching a config in configs/platform/ (default: slurm)",
+    )
+    p_queue.add_argument(
+        "--partition", default=None, metavar="PARTITION",
+        help="Override the partition from the platform config",
+    )
+    p_queue.add_argument(
+        "--all-users", action="store_true",
+        help="Show jobs from all users (default: only the configured username)",
+    )
+
 
 def _load_platform_config(platform: str):
     """Load a platform config, resolving its defaults chain via OmegaConf merge."""
@@ -1030,6 +1047,67 @@ def _run_platform_stop(args) -> None:
     print(f"Cancelled {n_jobs} job(s).")
 
 
+def _run_platform_queue(args):
+    import subprocess
+
+    cfg, _ = _load_platform_config(args.platform)
+
+    ssh_host = cfg.get("ssh")
+    if not ssh_host or ssh_host is False:
+        raise ValueError(f"Platform '{args.platform}' has no ssh host configured")
+
+    username  = cfg.get("username", "")
+    partition = getattr(args, "partition", None) or cfg.get("partition", None)
+    all_users = getattr(args, "all_users", False)
+
+    # %.Nf = right-align in N chars; %b = gres (gpu:type:count); %m = mem/node
+    fmt = "%.10i %.12P %.60j %.10u %.10T %5C %10m %10b %.12M %.12l %R"
+    cmd = f"squeue --format={fmt!r}"
+    if not all_users and username:
+        cmd += f" -u {username}"
+    if partition:
+        cmd += f" -p {partition}"
+
+    header = f"Queue on {ssh_host}"
+    if partition:
+        header += f" · partition {partition}"
+    if not all_users and username:
+        header += f" · user {username}"
+    # Partition totals from scontrol (TRES line has exact cpu/mem/gpu counts)
+    import re
+    sctl_cmd = f"scontrol show partition {partition}" if partition else "scontrol show partition"
+    sctl_out = subprocess.run(
+        ["ssh", ssh_host, sctl_cmd], capture_output=True, text=True,
+    ).stdout
+    tres_match = re.search(r"TRES=([^\n]+)", sctl_out)
+    total_cpus = total_gpus = mem_gb = 0
+    if tres_match:
+        tres = tres_match.group(1)
+        m = re.search(r"(?<![/\w])cpu=(\d+)", tres)
+        if m:
+            total_cpus = int(m.group(1))
+        m = re.search(r"(?<![/\w])mem=(\d+)([KMGT]?)", tres)
+        if m:
+            val, unit = int(m.group(1)), m.group(2) or "M"
+            mem_gb = val if unit == "G" else val * 1024 if unit == "T" else val // 1024
+        m = re.search(r"gres/gpu=(\d+)", tres)
+        if m:
+            total_gpus = int(m.group(1))
+
+    summary = f"cpu={total_cpus}  mem={mem_gb}GB  gpu={total_gpus}"
+    if total_gpus:
+        summary += (f"  cpu/gpu={total_cpus / total_gpus:.1f}"
+                    f"  mem/gpu={mem_gb / total_gpus:.0f}GB")
+
+    print("=" * 70)
+    print(header)
+    print("=" * 70)
+    subprocess.run(["ssh", ssh_host, cmd], check=True)
+    print("=" * 70)
+    print(summary)
+    print("=" * 70)
+
+
 def _run_platform(args):
     if args.platform_command == "setup":
         _run_platform_setup(args)
@@ -1043,6 +1121,8 @@ def _run_platform(args):
         _run_platform_run(args)
     elif args.platform_command == "stop":
         _run_platform_stop(args)
+    elif args.platform_command == "queue":
+        _run_platform_queue(args)
 
 
 # ── bench sub-parser ──────────────────────────────────────────────────────────
