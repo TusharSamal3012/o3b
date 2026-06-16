@@ -877,7 +877,7 @@ def transf4x4_from_spherical(azim, elev, theta, dist):
     if isinstance(dist, float):
         dist = torch.Tensor([dist])
 
-    dist = dist.clone().expand_as(elev)
+    dist = dist.expand_as(elev).clone()
     dist_init_mask = (dist == 0.)
     dist[dist_init_mask] = 1.
 

@@ -26,7 +26,7 @@ def _geodesic_pairwise(mesh, src_indices, dst_indices) -> "np.ndarray":
     face = mesh.faces.t().contiguous().long().cpu()      # (3, F)
     src  = torch.tensor(src_indices, dtype=torch.long)
     dest = torch.tensor(dst_indices, dtype=torch.long)
-    dists = geodesic_distance(pos, face, src=src, dest=dest, norm=True)
+    dists = geodesic_distance(pos, face, src=src, dst=dest, norm=True)
     return dists.cpu().numpy().astype(np.float32)
 
 

@@ -1311,25 +1311,27 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     subprocess.run(["ssh", ssh_host, remote_submit], check=True)
 
 
-def _job_exists_on_platform(platform: str, job_name: str) -> bool:
-    """Return True if a job named *job_name* is pending or running on the platform."""
+def _get_existing_jobs_on_platform(platform: str) -> set[str]:
+    """Return the set of all pending/running job names via a single squeue call."""
     import subprocess
 
     try:
         cfg, _ = _load_platform_config(platform)
     except Exception:
-        return False
+        return set()
 
     ssh_host = cfg.get("ssh")
     if not ssh_host or ssh_host is False:
-        return False
+        return set()
 
     username = cfg.get("username", "")
-    cmd = f"squeue --name={job_name} --noheader"
+    cmd = "squeue --noheader --format=%j"
     if username:
         cmd += f" -u {username}"
     result = subprocess.run(["ssh", ssh_host, cmd], capture_output=True, text=True)
-    return bool(result.stdout.strip())
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 def _run_bench_rrun(args) -> None:
@@ -1350,7 +1352,15 @@ def _run_bench_rrun(args) -> None:
     else:
         combos = [()]
 
-    for combo in combos:
+    n_total = len(combos)
+    print(f"Checking {n_total} job(s) on {platform}…")
+    existing_jobs = _get_existing_jobs_on_platform(platform)
+
+    n_existing = 0
+    n_submitted = 0
+    width = len(str(n_total))
+
+    for i, combo in enumerate(combos, 1):
         # collect platform.deps from ablation YAMLs (union across all files in combo)
         ablation_deps: list | None = None
         for f in combo:
@@ -1378,14 +1388,18 @@ def _run_bench_rrun(args) -> None:
             job_name = bench_stem
         remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
-        print(f"\nChecking '{job_name}' on {platform}…")
-        if _job_exists_on_platform(platform, job_name):
-            print(f"  → skipping: job '{job_name}' is already pending/running on {platform}")
+        prefix = f"[{i:{width}}/{n_total}]"
+        if job_name in existing_jobs:
+            n_existing += 1
+            print(f"{prefix} skip   {job_name}")
             continue
 
-        print(f"  Submitting: {remote_cmd}")
+        print(f"{prefix} submit {job_name}")
         _run_bench_sbatch_cmd(platform, remote_cmd, job_name, deps_override=effective_deps)
-        print(f"  → submitted")
+        n_submitted += 1
+
+    print(f"\nDone — {n_submitted} submitted, {n_existing} already running/pending"
+          + (f", {n_total - n_submitted - n_existing} skipped for other reasons" if n_submitted + n_existing < n_total else ""))
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
