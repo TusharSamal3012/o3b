@@ -199,6 +199,10 @@ def _build_platform_parser(sub):
         "--configs", action="store_true",
         help="Also print the resolved platform config",
     )
+    p_overview.add_argument(
+        "--hours", type=float, default=2.0, metavar="N",
+        help="Show sacct history for the last N hours (default: 2)",
+    )
 
     p_runi = plat_sub.add_parser(
         "runi",
@@ -465,11 +469,11 @@ def _run_platform_setup(args):
     subprocess.run(["ssh", ssh_host, remote_cmd], check=True)
 
 
-def _fetch_jobs(ssh_host: str, username: str) -> list:
-    """Return job list from sacct (last 24 h) as a list of dicts."""
+def _fetch_jobs(ssh_host: str, username: str, hours: float = 2.0) -> list:
+    """Return job list from sacct for the last *hours* hours as a list of dicts."""
     import subprocess
     fields      = ["JobID", "JobName", "State", "ExitCode", "Elapsed", "Start", "End", "Partition", "NodeList"]
-    start_expr  = "$(date -d '24 hours ago' +'%Y-%m-%dT%H:%M:%S')"
+    start_expr  = f"$(date -d '{hours} hours ago' +'%Y-%m-%dT%H:%M:%S')"
     cmd = (
         f"sacct --starttime={start_expr}"
         f" --format={','.join(fields)!r}"
@@ -534,7 +538,7 @@ def _overview_tui(stdscr, jobs: list, ssh_host: str, title: str):
 
     COLS = [
         ("JobID",     10, ">"),
-        ("JobName",   26, "<"),
+        ("JobName",   60, "<"),
         ("State",     14, "<"),
         ("ExitCode",   8, ">"),
         ("Elapsed",   10, "<"),
@@ -659,8 +663,10 @@ def _run_platform_overview(args):
     print()
 
     # ── TUI loop ────────────────────────────────────────────────────
-    tui_title = f"SLURM overview · {ssh_host}" + (f" · {username}" if username else "") + " · last 24 h"
-    jobs = _fetch_jobs(ssh_host, username)
+    hours = getattr(args, "hours", 2.0)
+    hours_label = f"{hours:g} h"
+    tui_title = f"SLURM overview · {ssh_host}" + (f" · {username}" if username else "") + f" · last {hours_label}"
+    jobs = _fetch_jobs(ssh_host, username, hours=hours)
 
     while True:
         action = curses.wrapper(lambda scr: _overview_tui(scr, jobs, ssh_host, tui_title))
