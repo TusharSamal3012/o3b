@@ -21,16 +21,18 @@ class ObjectPairQuantBatch:
     kpts_mask:           Optional[Tensor] = None  # (B, K)  bool — valid keypoints
 
     # ── per-sample keypoint aggregates ───────────────────────────────────────
-    kpts_trgt_pck01:         Optional[Tensor] = None  # (B,)  PCK @ 0.1 * trgt_max_dim
-    kpts_trgt_euc_dist_mean: Optional[Tensor] = None  # (B,)  mean Euclidean dist
-    kpts_trgt_geo_dist_mean: Optional[Tensor] = None  # (B,)  mean normalized geodesic dist
-    kpts_trgt_geo_auc:       Optional[Tensor] = None  # (B,)  AUC of PCK-geo curve (linspace thresh)
+    kpts_trgt_pck01:              Optional[Tensor] = None  # (B,)  PCK @ 0.1 * trgt_max_dim
+    kpts_trgt_euc_dist_mean:      Optional[Tensor] = None  # (B,)  mean Euclidean dist
+    kpts_trgt_geo_dist_mean:      Optional[Tensor] = None  # (B,)  mean geodesic dist
+    kpts_trgt_geo_dist_norm_mean: Optional[Tensor] = None  # (B,)  mean geodesic dist / sqrt(surface area)
+    kpts_trgt_geo_auc01:            Optional[Tensor] = None  # (B,)  AUC of PCK-geo curve [0, 0.1] normalized
 
     # ── per-sample part aggregates ────────────────────────────────────────────
-    parts_trgt_euc_dist_mean: Optional[Tensor] = None  # (B,)  mean Euclidean dist
-    parts_trgt_geo_dist_mean: Optional[Tensor] = None  # (B,)  mean normalized geodesic dist
-    parts_trgt_geo_auc:       Optional[Tensor] = None  # (B,)  AUC of PCK-geo curve (linspace thresh)
-    parts_trgt_pck:           Optional[Tensor] = None  # (B,)  fraction same part predicted
+    parts_trgt_euc_dist_mean:      Optional[Tensor] = None  # (B,)  mean Euclidean dist
+    parts_trgt_geo_dist_mean:      Optional[Tensor] = None  # (B,)  mean geodesic dist
+    parts_trgt_geo_dist_norm_mean: Optional[Tensor] = None  # (B,)  mean geodesic dist / sqrt(surface area)
+    parts_trgt_geo_auc01:            Optional[Tensor] = None  # (B,)  AUC of PCK-geo curve [0, 0.1] normalized
+    parts_trgt_pck:                Optional[Tensor] = None  # (B,)  fraction same part predicted
 
     # extra per-task metrics
     extra: dict = field(default_factory=dict)
@@ -48,10 +50,12 @@ class ObjectPairQuantBatch:
             "kpts_trgt_pck01",
             "kpts_trgt_euc_dist_mean",
             "kpts_trgt_geo_dist_mean",
-            "kpts_trgt_geo_auc",
+            "kpts_trgt_geo_dist_norm_mean",
+            "kpts_trgt_geo_auc01",
             "parts_trgt_euc_dist_mean",
             "parts_trgt_geo_dist_mean",
-            "parts_trgt_geo_auc",
+            "parts_trgt_geo_dist_norm_mean",
+            "parts_trgt_geo_auc01",
             "parts_trgt_pck",
         ):
             val = getattr(self, fname)

@@ -1286,12 +1286,200 @@ def _build_bench_parser(sub):
              "(e.g. -d diff3f or -d densematcher,diff3f). Controls venv selection.",
     )
 
+    def _add_fetch_args(q):
+        _add_bench_args(q)
+        q.add_argument(
+            "-e", "--entity", default=None, metavar="ENTITY",
+            help="W&B entity (user or team). Defaults to the logged-in user's default entity.",
+        )
+        q.add_argument(
+            "-o", "--output", default=None, type=Path, metavar="FILE",
+            help="Output CSV path (default: <benchmark>.csv in CWD)",
+        )
+
+    p_fetch = bench_sub.add_parser("fetch", help="Fetch eval metrics from wandb and save to CSV")
+    _add_fetch_args(p_fetch)
+
+    p_viz = bench_sub.add_parser("viz", help="Interactively plot eval metrics from a bench CSV")
+    _add_fetch_args(p_viz)
+
+
+def _run_bench_fetch(args) -> None:
+    """Fetch eval/* metrics from wandb for all job names that rrun would submit."""
+    import csv
+    import re
+    import yaml
+
+    bench_stem = args.benchmark.stem
+
+    with open(args.benchmark) as f:
+        raw = yaml.safe_load(f) or {}
+    wandb_cfg = raw.get("wandb") or {}
+    wb_project = wandb_cfg.get("project", bench_stem)
+    wb_entity   = args.entity or wandb_cfg.get("entity", None)
+    project_path = f"{wb_entity}/{wb_project}" if wb_entity else wb_project
+
+    if args.ablation:
+        combos = _ablation_combinations(args.ablation)
+        if not combos:
+            print(f"WARNING: no YAML files found in {args.ablation!r}")
+            return
+    else:
+        combos = [()]
+
+    try:
+        import wandb as _wb_mod
+        api = _wb_mod.Api()
+    except ImportError:
+        print("ERROR: wandb is not installed. Run: pip install wandb")
+        return
+
+    rows = []
+    for combo in combos:
+        job_name = (
+            f"{bench_stem}__{'__'.join(f.stem for f in combo)}"
+            if combo else bench_stem
+        )
+        # wandb run name is f"{timestamp}__{job_name}" where timestamp is MMDD_HHMMSS
+        pattern = rf"^\d{{4}}_\d{{6}}__{re.escape(job_name)}$"
+        print(f"Querying {project_path!r} for {job_name!r} …")
+        try:
+            matched = list(api.runs(project_path, filters={"display_name": {"$regex": pattern}}))
+        except Exception as exc:
+            print(f"  ERROR: {exc}")
+            continue
+
+        if not matched:
+            print("  no runs found")
+            continue
+
+        for run in matched:
+            row: dict = {"job": job_name, "wandb_run": run.name, "state": run.state}
+            for k, v in run.summary.items():
+                if k.startswith("eval/") and isinstance(v, (int, float)):
+                    row[k] = round(float(v), 6)
+            rows.append(row)
+            n_metrics = sum(1 for k in row if k.startswith("eval/"))
+            print(f"  {run.name}  state={run.state}  eval_metrics={n_metrics}")
+
+    if not rows:
+        print("No matching runs found.")
+        return
+
+    meta_cols   = ["job", "wandb_run", "state"]
+    metric_cols = sorted({k for row in rows for k in row if k.startswith("eval/")})
+    fieldnames  = meta_cols + metric_cols
+
+    output = args.output or Path(f"{bench_stem}.csv")
+    with open(output, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"\nSaved {len(rows)} row(s) → {output}")
+
+
+def _run_bench_viz(args) -> None:
+    """Load (or fetch) the bench CSV and show an interactive bar-plot for a chosen metric."""
+    import csv
+    from collections import defaultdict
+
+    bench_stem = args.benchmark.stem
+    csv_path   = args.output or Path(f"{bench_stem}.csv")
+
+    if not csv_path.exists():
+        print(f"CSV not found at {csv_path} — fetching from wandb first …")
+        _run_bench_fetch(args)
+
+    if not csv_path.exists():
+        print("ERROR: could not obtain CSV.")
+        return
+
+    with open(csv_path, newline="") as f:
+        reader    = csv.DictReader(f)
+        all_rows  = list(reader)
+        fieldnames = reader.fieldnames or []
+
+    metric_cols = [c for c in fieldnames if c.startswith("eval/") and c != "eval/n_samples"]
+    if not metric_cols:
+        print("No eval/* columns found in CSV.")
+        return
+
+    # For each job keep only the latest finished run that has at least one metric value
+    by_job: dict[str, list] = defaultdict(list)
+    for row in all_rows:
+        by_job[row["job"]].append(row)
+
+    best_rows = []
+    for job in sorted(by_job):
+        candidates = [
+            r for r in by_job[job]
+            if r.get("state") == "finished"
+            and any(r.get(m, "").strip() != "" for m in metric_cols)
+        ]
+        if candidates:
+            best_rows.append(max(candidates, key=lambda r: r["wandb_run"]))
+
+    if not best_rows:
+        print("No finished runs with metrics found in CSV.")
+        return
+
+    available = [m for m in metric_cols if any(r.get(m, "").strip() != "" for r in best_rows)]
+    if not available:
+        print("No non-empty metric values found.")
+        return
+
+    # Interactive metric selection
+    print("\nAvailable metrics:")
+    for i, m in enumerate(available, 1):
+        print(f"  [{i}] {m}")
+    while True:
+        raw = input(f"\nSelect metric [1-{len(available)}]: ").strip()
+        if raw.isdigit() and 1 <= int(raw) <= len(available):
+            metric = available[int(raw) - 1]
+            break
+        print(f"  Enter a number between 1 and {len(available)}.")
+
+    # Filter to runs that have a value for the chosen metric
+    plot_rows = [r for r in best_rows if r.get(metric, "").strip() != ""]
+    if not plot_rows:
+        print(f"No rows with values for {metric!r}.")
+        return
+
+    # Label = last __ component of the job name (e.g. the category)
+    labels = [r["job"].split("__")[-1] for r in plot_rows]
+    values = [float(r[metric]) for r in plot_rows]
+
+    # Sort descending by value
+    pairs  = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
+    labels, values = [p[0] for p in pairs], [p[1] for p in pairs]
+
+    avg = sum(values) / len(values)
+    labels.append("Average")
+    values.append(avg)
+
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.7), 5))
+    colors  = ["steelblue"] * (len(labels) - 1) + ["darkorange"]
+    bars    = ax.bar(labels, values, color=colors)
+    ax.bar_label(bars, fmt="%.4f", padding=3, fontsize=7)
+    ax.set_title(f"{bench_stem}  —  {metric}", fontsize=10)
+    ax.set_ylabel(metric)
+    ax.set_xlabel("category")
+    plt.xticks(rotation=45, ha="right", fontsize=8)
+    plt.tight_layout()
+    plt.show()
+
 
 def _run_bench(args) -> None:
     if args.bench_command == "run":
         _run_bench_run(args)
     elif args.bench_command == "rrun":
         _run_bench_rrun(args)
+    elif args.bench_command == "fetch":
+        _run_bench_fetch(args)
+    elif args.bench_command == "viz":
+        _run_bench_viz(args)
 
 
 def _run_bench_run(args) -> None:
