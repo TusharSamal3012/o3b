@@ -5,8 +5,15 @@ defaults:
 item_type: object
 
 mesh_type: "default"
+#mesh_type: "mc16_vuni100_r256_fdiff3f"
 
+#subsets:
+#  - test
 
+#categories:
+#  #- animals
+#  - banana
+#  #- apple
 
 # o3b dataset fetch -d dm_object
 # o3b dataset index -d dm_object

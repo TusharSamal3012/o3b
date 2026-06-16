@@ -417,7 +417,9 @@ class DenseMatcher(ConfigurableDataset):
                 print(f"{src_row['object_id']}  <--->  {trgt_row['object_id']}")
             else:
                 row = dataset._object_rows[entry]
-                print(f"{row['object_id']}")
+                mesh_rel = row.get("mesh_path")
+                mesh_path = (dataset.path_raw / mesh_rel) if mesh_rel else (dataset.path_object_meshes / row["object_id"])
+                print(f"{row['object_id']}  {mesh_path}")
 
         from o3b.data.viz import visualize_dataset
         visualize_dataset(dataset, render=render, render_frames=render_frames, renderer=renderer, debug=debug)
