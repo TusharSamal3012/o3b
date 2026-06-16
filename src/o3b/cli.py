@@ -1285,6 +1285,10 @@ def _build_bench_parser(sub):
         help="Comma-separated dep sets that override the platform config's deps field "
              "(e.g. -d diff3f or -d densematcher,diff3f). Controls venv selection.",
     )
+    p_rrun.add_argument(
+        "--force", action="store_true",
+        help="Submit jobs even if they are already running, pending, or recently completed.",
+    )
 
     def _add_fetch_args(q):
         _add_bench_args(q)
@@ -1370,7 +1374,8 @@ def _run_bench_fetch(args) -> None:
     metric_cols = sorted({k for row in rows for k in row if k.startswith("eval/")})
     fieldnames  = meta_cols + metric_cols
 
-    output = args.output or Path(f"{bench_stem}.csv")
+    output = args.output or Path("tables") / f"{bench_stem}.csv"
+    output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -1384,7 +1389,7 @@ def _run_bench_viz(args) -> None:
     from collections import defaultdict
 
     bench_stem = args.benchmark.stem
-    csv_path   = args.output or Path(f"{bench_stem}.csv")
+    csv_path   = args.output or Path("tables") / f"{bench_stem}.csv"
 
     if not csv_path.exists():
         print(f"CSV not found at {csv_path} — fetching from wandb first …")
@@ -1724,9 +1729,10 @@ def _run_bench_rrun(args) -> None:
     else:
         combos = [()]
 
+    force = getattr(args, "force", False)
     n_total = len(combos)
     print(f"Checking {n_total} job(s) on {platform}…")
-    existing_jobs = _get_existing_jobs_on_platform(platform)
+    existing_jobs = set() if force else _get_existing_jobs_on_platform(platform)
 
     n_existing = 0
     n_submitted = 0
