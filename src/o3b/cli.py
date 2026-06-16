@@ -276,6 +276,20 @@ def _multiply_metric_with_unit(metric_with_unit: str, factor: int) -> str:
     return str(metric_with_unit)
 
 
+def _save_script_locally(name: str, content: str) -> Path:
+    """Save *content* to ~/.o3b/scripts/<timestamp>_<name>.sh and return the path."""
+    import re
+    from datetime import datetime
+
+    scripts_dir = Path.home() / ".o3b" / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%m%d_%H%M%S")
+    safe = re.sub(r"[^A-Za-z0-9_\-]", "_", name)
+    path = scripts_dir / f"{ts}_{safe}.sh"
+    path.write_text(content)
+    return path
+
+
 def _make_sbatch_script(cfg, job_name: str, env_vars: dict, remote_setup_script: str) -> str:
     """Return a complete sbatch script string built from platform config values."""
 
@@ -446,6 +460,12 @@ def _run_platform_setup(args):
         env_vars=env_vars,
         remote_setup_script=remote_setup,
     )
+
+    # Save both scripts locally with timestamp before sending to remote
+    local_setup_copy = _save_script_locally(f"setup_{repo_name}_script", setup_script_local.read_text())
+    local_sbatch     = _save_script_locally(f"setup_{repo_name}_sbatch", sbatch_script)
+    print(f"  saved locally: {local_setup_copy}")
+    print(f"  saved locally: {local_sbatch}")
 
     # Write sbatch script to a temp file and SCP both scripts
     import tempfile
@@ -1290,9 +1310,11 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     }
 
     # run script: env preamble (CUDA, venv, cd, setup/pull) + the actual command
-    run_script_lines = ["#!/usr/bin/env bash", "set -euo pipefail", ""] + \
-                       _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) + \
-                       ["", command]
+    run_script_content = "\n".join(
+        ["#!/usr/bin/env bash", "set -euo pipefail", ""] +
+        _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) +
+        ["", command]
+    )
     remote_run_script = f"{path_ws}/.od3d_bench_run.sh"
 
     sbatch_script = _make_sbatch_script(
@@ -1303,9 +1325,15 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     )
     remote_sbatch = f"{path_ws}/.od3d_bench_sbatch.sh"
 
+    # Save both scripts locally with timestamp before sending to remote
+    local_run    = _save_script_locally(f"bench_run_{job_name}",    run_script_content)
+    local_sbatch = _save_script_locally(f"bench_sbatch_{job_name}", sbatch_script)
+    print(f"  saved locally: {local_run}")
+    print(f"  saved locally: {local_sbatch}")
+
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_run_script} && chmod +x {remote_run_script}"],
-        input="\n".join(run_script_lines), text=True, check=True,
+        input=run_script_content, text=True, check=True,
     )
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_sbatch} && chmod +x {remote_sbatch}"],
