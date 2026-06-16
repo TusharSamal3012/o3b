@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 
@@ -276,14 +277,15 @@ def _multiply_metric_with_unit(metric_with_unit: str, factor: int) -> str:
     return str(metric_with_unit)
 
 
-def _save_script_locally(name: str, content: str) -> Path:
+def _save_script_locally(name: str, content: str, ts: str | None = None) -> Path:
     """Save *content* to ~/.o3b/scripts/<timestamp>_<name>.sh and return the path."""
     import re
     from datetime import datetime
 
     scripts_dir = Path.home() / ".o3b" / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%m%d_%H%M%S")
+    if ts is None:
+        ts = datetime.now().strftime("%m%d_%H%M%S")
     safe = re.sub(r"[^A-Za-z0-9_\-]", "_", name)
     path = scripts_dir / f"{ts}_{safe}.sh"
     path.write_text(content)
@@ -505,7 +507,9 @@ def _fetch_jobs(ssh_host: str, username: str, hours: float = 2.0) -> list:
     lines  = [l for l in result.stdout.splitlines() if l.strip()]
     if len(lines) < 2:
         return []
-    return [dict(zip(fields, row.split("|"))) for row in lines[1:]]
+    jobs = [dict(zip(fields, row.split("|"))) for row in lines[1:]]
+    jobs.sort(key=lambda j: int(j.get("JobID", 0) or 0), reverse=True)
+    return jobs
 
 
 def _open_log(ssh_host: str, path_home: str, job: dict) -> None:
@@ -1309,13 +1313,16 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         "https_proxy":     _proxy,
     }
 
+    from datetime import datetime
+    ts = datetime.now().strftime("%m%d_%H%M%S")
+
     # run script: env preamble (CUDA, venv, cd, setup/pull) + the actual command
     run_script_content = "\n".join(
         ["#!/usr/bin/env bash", "set -euo pipefail", ""] +
         _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) +
         ["", command]
     )
-    remote_run_script = f"{path_ws}/.od3d_bench_run.sh"
+    remote_run_script = f"{path_ws}/.bench_run_{job_name}_{ts}.sh"
 
     sbatch_script = _make_sbatch_script(
         cfg,
@@ -1323,11 +1330,11 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         env_vars=env_vars,
         remote_setup_script=remote_run_script,
     )
-    remote_sbatch = f"{path_ws}/.od3d_bench_sbatch.sh"
+    remote_sbatch = f"{path_ws}/.bench_sbatch_{job_name}_{ts}.sh"
 
-    # Save both scripts locally with timestamp before sending to remote
-    local_run    = _save_script_locally(f"bench_run_{job_name}",    run_script_content)
-    local_sbatch = _save_script_locally(f"bench_sbatch_{job_name}", sbatch_script)
+    # Save both scripts locally with the same timestamp before sending to remote
+    local_run    = _save_script_locally(f"bench_run_{job_name}",    run_script_content, ts=ts)
+    local_sbatch = _save_script_locally(f"bench_sbatch_{job_name}", sbatch_script,      ts=ts)
     print(f"  saved locally: {local_run}")
     print(f"  saved locally: {local_sbatch}")
 
@@ -1431,6 +1438,7 @@ def _run_bench_rrun(args) -> None:
         print(f"{prefix} submit {job_name}")
         _run_bench_sbatch_cmd(platform, remote_cmd, job_name, deps_override=effective_deps)
         n_submitted += 1
+        time.sleep(1)
 
     print(f"\nDone — {n_submitted} submitted, {n_existing} already running/pending"
           + (f", {n_total - n_submitted - n_existing} skipped for other reasons" if n_submitted + n_existing < n_total else ""))
