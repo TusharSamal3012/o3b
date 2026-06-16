@@ -248,6 +248,10 @@ def _build_platform_parser(sub):
         "-y", "--yes", action="store_true",
         help="Skip confirmation prompt",
     )
+    p_stop.add_argument(
+        "-j", "--jobs", default=None, metavar="A-B",
+        help="Cancel only jobs in the inclusive ID range A-B (e.g. 29175478-29175502)",
+    )
 
     p_queue = plat_sub.add_parser(
         "queue",
@@ -265,6 +269,7 @@ def _build_platform_parser(sub):
         "--all-users", action="store_true",
         help="Show jobs from all users (default: only the configured username)",
     )
+
 
 
 def _load_platform_config(platform: str):
@@ -850,6 +855,13 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
         f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
         f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/x86_64-linux/lib",
     ]
+    # acquire the same directory lock used by setup_slurm.sh so concurrent
+    # srun jobs don't race on git pull / submodule update / venv install
+    if path_ws:
+        lines += [
+            f'exec 200>{path_ws}/setup_slurm.lock',
+            f'flock -x 200',
+        ]
     # run full setup script (e.g. install deps) when SETUP=true
     if path_ws:
         lines += [
@@ -885,6 +897,8 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
             f'    fi',
             f'fi',
         ]
+    if path_ws:
+        lines.append('exec 200>&-')
     if venv_path:
         lines.append(f"[ -d {venv_path} ] && source {venv_path}/bin/activate")
     if repo_path:
@@ -1009,8 +1023,46 @@ def _run_platform_stop(args) -> None:
 
     username  = cfg.get("username", "")
     partition = cfg.get("partition", None)
+    job_range = getattr(args, "jobs", None)
 
-    # Show the jobs that would be cancelled before asking for confirmation.
+    if job_range:
+        # ── range mode: cancel job IDs A through B inclusive ──────────
+        try:
+            a, b = job_range.split("-")
+            id_start, id_end = int(a), int(b)
+        except ValueError:
+            raise ValueError(f"Invalid job range {job_range!r} — expected format A-B")
+
+        job_ids = list(range(id_start, id_end + 1))
+        ids_str = " ".join(str(j) for j in job_ids)
+
+        # Preview: query only those specific job IDs for this user
+        squeue_cmd = f"squeue -j {','.join(str(j) for j in job_ids)} --format='%.10i %.12P %.30j %.10T %.12M' 2>/dev/null"
+        if username:
+            squeue_cmd += f" -u {username}"
+        result = subprocess.run(["ssh", ssh_host, squeue_cmd], capture_output=True, text=True)
+        lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
+        n_found = max(0, len(lines) - 1)
+
+        if lines:
+            print(result.stdout.strip())
+        print(f"\n{n_found} job(s) found in range {id_start}–{id_end} ({len(job_ids)} IDs checked).")
+
+        if not args.yes:
+            print(f"Cancel all {len(job_ids)} job IDs in range? [y/N] ", end="", flush=True)
+            if input().strip().lower() != "y":
+                print("Aborted.")
+                return
+
+        scancel_range_cmd = f"scancel {ids_str}"
+        if username:
+            scancel_range_cmd += f" --user={username}"
+        print(f"Running: scancel {id_start}…{id_end}")
+        subprocess.run(["ssh", ssh_host, scancel_range_cmd], check=True)
+        print(f"Cancelled job IDs {id_start}–{id_end}.")
+        return
+
+    # ── default mode: cancel all jobs for user/partition ──────────────
     squeue_cmd = "squeue --format='%.10i %.12P %.30j %.10T %.12M'"
     if username:
         squeue_cmd += f" -u {username}"
@@ -1433,7 +1485,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
 
 
 def _get_existing_jobs_on_platform(platform: str) -> set[str]:
-    """Return the set of all pending/running job names via a single squeue call."""
+    """Return job names that are pending/running OR completed in the last 24 hours."""
     import subprocess
 
     try:
@@ -1446,13 +1498,24 @@ def _get_existing_jobs_on_platform(platform: str) -> set[str]:
         return set()
 
     username = cfg.get("username", "")
+
+    # pending / running jobs via squeue
     cmd = "squeue --noheader --format=%j"
     if username:
         cmd += f" -u {username}"
     result = subprocess.run(["ssh", ssh_host, cmd], capture_output=True, text=True)
-    if result.returncode != 0:
-        return set()
-    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    names: set[str] = set()
+    if result.returncode == 0:
+        names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+    # completed jobs in the last 24 hours via sacct
+    try:
+        completed = _fetch_jobs(ssh_host, username, hours=24.0)
+        names |= {j["JobName"] for j in completed if j.get("State", "").startswith("COMPLETED")}
+    except Exception:
+        pass
+
+    return names
 
 
 def _run_bench_rrun(args) -> None:
@@ -1520,7 +1583,7 @@ def _run_bench_rrun(args) -> None:
         n_submitted += 1
         time.sleep(1)
 
-    print(f"\nDone — {n_submitted} submitted, {n_existing} already running/pending"
+    print(f"\nDone — {n_submitted} submitted, {n_existing} already running/pending/completed"
           + (f", {n_total - n_submitted - n_existing} skipped for other reasons" if n_submitted + n_existing < n_total else ""))
 
 
