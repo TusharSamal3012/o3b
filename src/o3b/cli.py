@@ -1289,6 +1289,10 @@ def _build_bench_parser(sub):
         "--force", action="store_true",
         help="Submit jobs even if they are already running, pending, or recently completed.",
     )
+    p_rrun.add_argument(
+        "--skip-fetched", action="store_true",
+        help="Skip jobs whose ablation combo already has a row in the fetched tables/ CSV.",
+    )
 
     def _add_fetch_args(q):
         _add_bench_args(q)
@@ -1338,6 +1342,14 @@ def _run_bench_fetch(args) -> None:
         print("ERROR: wandb is not installed. Run: pip install wandb")
         return
 
+    _ablation_base = Path.cwd() / "src" / "configs" / "ablation"
+    def _ablation_col_name(a: Path) -> str:
+        try:
+            return str(a.relative_to(_ablation_base))
+        except ValueError:
+            return a.name
+    ablation_col_names = [_ablation_col_name(a) for a in args.ablation] if args.ablation else []
+
     rows = []
     for combo in combos:
         job_name = (
@@ -1357,24 +1369,36 @@ def _run_bench_fetch(args) -> None:
             print("  no runs found")
             continue
 
-        for run in matched:
-            row: dict = {"job": job_name, "wandb_run": run.name, "state": run.state}
-            for k, v in run.summary.items():
-                if k.startswith("eval/") and isinstance(v, (int, float)):
-                    row[k] = round(float(v), 6)
-            rows.append(row)
-            n_metrics = sum(1 for k in row if k.startswith("eval/"))
-            print(f"  {run.name}  state={run.state}  eval_metrics={n_metrics}")
+        finished = [r for r in matched if r.state == "finished"]
+        if not finished:
+            print(f"  no finished runs (found {len(matched)} with other states)")
+            continue
+        run = max(finished, key=lambda r: r.name)
+
+        row: dict = {"job": job_name, "wandb_run": run.name, "state": run.state}
+        for col, f in zip(ablation_col_names, combo):
+            row[col] = f.stem
+        for k, v in run.summary.items():
+            if k.startswith("eval/") and isinstance(v, (int, float)):
+                row[k] = round(float(v), 6)
+        rows.append(row)
+        n_metrics = sum(1 for k in row if k.startswith("eval/"))
+        print(f"  {run.name}  state={run.state}  eval_metrics={n_metrics}")
 
     if not rows:
         print("No matching runs found.")
         return
 
-    meta_cols   = ["job", "wandb_run", "state"]
+    meta_cols   = ["job", "wandb_run", "state"] + ablation_col_names
     metric_cols = sorted({k for row in rows for k in row if k.startswith("eval/")})
     fieldnames  = meta_cols + metric_cols
 
-    output = args.output or Path("tables") / f"{bench_stem}.csv"
+    if ablation_col_names:
+        safe = [n.replace("/", "_") for n in ablation_col_names]
+        table_stem = f"{bench_stem}__{'__'.join(safe)}"
+    else:
+        table_stem = bench_stem
+    output = args.output or Path("tables") / f"{table_stem}.csv"
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -1389,7 +1413,18 @@ def _run_bench_viz(args) -> None:
     from collections import defaultdict
 
     bench_stem = args.benchmark.stem
-    csv_path   = args.output or Path("tables") / f"{bench_stem}.csv"
+    _ablation_base = Path.cwd() / "src" / "configs" / "ablation"
+    if args.ablation:
+        abl_names = []
+        for a in args.ablation:
+            try:
+                abl_names.append(str(a.relative_to(_ablation_base)).replace("/", "_"))
+            except ValueError:
+                abl_names.append(a.name.replace("/", "_"))
+        table_stem = f"{bench_stem}__{'__'.join(abl_names)}"
+    else:
+        table_stem = bench_stem
+    csv_path   = args.output or Path("tables") / f"{table_stem}.csv"
 
     if not csv_path.exists():
         print(f"CSV not found at {csv_path} — fetching from wandb first …")
@@ -1450,19 +1485,81 @@ def _run_bench_viz(args) -> None:
         print(f"No rows with values for {metric!r}.")
         return
 
-    # Label = last __ component of the job name (e.g. the category)
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # ── two ablation directions → heatmap ─────────────────────────────
+    if args.ablation and len(args.ablation) == 2:
+        _abl_base = Path.cwd() / "src" / "configs" / "ablation"
+        def _abl_col(a: Path) -> str:
+            try:
+                return str(a.relative_to(_abl_base))
+            except ValueError:
+                return a.name
+        col_a, col_b = [_abl_col(a) for a in args.ablation]
+
+        vals_a = sorted({r[col_a] for r in plot_rows if col_a in r})
+        vals_b = sorted({r[col_b] for r in plot_rows if col_b in r})
+
+        mat = np.full((len(vals_a), len(vals_b)), float("nan"))
+        for r in plot_rows:
+            if col_a not in r or col_b not in r:
+                continue
+            ia = vals_a.index(r[col_a])
+            ib = vals_b.index(r[col_b])
+            mat[ia, ib] = float(r[metric])
+
+        # extend matrix with average row (bottom) and average column (right)
+        avg_col  = np.nanmean(mat, axis=1, keepdims=True)   # per row  → right column
+        avg_row  = np.nanmean(mat, axis=0, keepdims=True)   # per col  → bottom row
+        avg_all  = np.nanmean(mat, keepdims=True).reshape(1, 1)
+        ext_mat  = np.block([
+            [mat,     avg_col],
+            [avg_row, avg_all],
+        ])
+        xticks = list(vals_b) + ["Avg"]
+        yticks = list(vals_a) + ["Avg"]
+        na, nb = len(vals_a), len(vals_b)
+
+        fig, ax = plt.subplots(figsize=(max(6, (nb + 1) * 0.9 + 1), max(3, (na + 1) * 0.7 + 1)))
+        im = ax.imshow(ext_mat, aspect="auto", cmap="viridis")
+        plt.colorbar(im, ax=ax, label=metric)
+
+        ax.set_xticks(range(nb + 1))
+        ax.set_xticklabels(xticks, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(range(na + 1))
+        ax.set_yticklabels(yticks, fontsize=8)
+        ax.set_xlabel(col_b, fontsize=9)
+        ax.set_ylabel(col_a, fontsize=9)
+        ax.set_title(f"{bench_stem}  —  {metric}", fontsize=10)
+
+        # separator lines before the average row/column
+        ax.axhline(na - 0.5, color="white", linewidth=1.5, linestyle="--")
+        ax.axvline(nb - 0.5, color="white", linewidth=1.5, linestyle="--")
+
+        vmin, vmax = np.nanmin(ext_mat), np.nanmax(ext_mat)
+        mid = (vmin + vmax) / 2
+        for ia in range(na + 1):
+            for ib in range(nb + 1):
+                v = ext_mat[ia, ib]
+                if not np.isnan(v):
+                    color = "white" if v < mid else "black"
+                    ax.text(ib, ia, f"{v:.4f}", ha="center", va="center", fontsize=7, color=color)
+
+        plt.tight_layout()
+        plt.show()
+        return
+
+    # ── single ablation direction → bar chart ─────────────────────────
     labels = [r["job"].split("__")[-1] for r in plot_rows]
     values = [float(r[metric]) for r in plot_rows]
 
-    # Sort descending by value
     pairs  = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
     labels, values = [p[0] for p in pairs], [p[1] for p in pairs]
 
     avg = sum(values) / len(values)
     labels.append("Average")
     values.append(avg)
-
-    import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(max(8, len(labels) * 0.7), 5))
     colors  = ["steelblue"] * (len(labels) - 1) + ["darkorange"]
@@ -1734,6 +1831,31 @@ def _run_bench_rrun(args) -> None:
     print(f"Checking {n_total} job(s) on {platform}…")
     existing_jobs = set() if force else _get_existing_jobs_on_platform(platform)
 
+    # build set of already-fetched ablation combos from the tables/ CSV
+    fetched_combos: set[tuple] = set()
+    if getattr(args, "skip_fetched", False):
+        import csv as _csv
+        _ablation_base = Path.cwd() / "src" / "configs" / "ablation"
+        def _abl_col(a: Path) -> str:
+            try:
+                return str(a.relative_to(_ablation_base))
+            except ValueError:
+                return a.name
+        abl_col_names = [_abl_col(a) for a in args.ablation] if args.ablation else []
+        if abl_col_names:
+            safe = [n.replace("/", "_") for n in abl_col_names]
+            table_stem = f"{bench_stem}__{'__'.join(safe)}"
+        else:
+            table_stem = bench_stem
+        table_path = Path("tables") / f"{table_stem}.csv"
+        if table_path.exists():
+            with open(table_path, newline="") as _f:
+                for _row in _csv.DictReader(_f):
+                    fetched_combos.add(tuple(_row.get(col, "") for col in abl_col_names))
+            print(f"Loaded {len(fetched_combos)} fetched combo(s) from {table_path}")
+        else:
+            print(f"WARNING: --skip-fetched set but table not found: {table_path}")
+
     n_existing = 0
     n_submitted = 0
     width = len(str(n_total))
@@ -1767,6 +1889,11 @@ def _run_bench_rrun(args) -> None:
         remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
         prefix = f"[{i:{width}}/{n_total}]"
+        combo_key = tuple(f.stem for f in combo)
+        if fetched_combos and combo_key in fetched_combos:
+            n_existing += 1
+            print(f"{prefix} skip (in table) {job_name}")
+            continue
         if job_name in existing_jobs:
             n_existing += 1
             print(f"{prefix} skip   {job_name}")
