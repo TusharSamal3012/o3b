@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
+from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
 import torch
 from torch import Tensor
 from o3b.data.datatypes.mesh import Mesh
@@ -218,10 +219,13 @@ class Object:
         from o3b.data.viz import sample_uniform_viewpoints, render_mesh_from_viewpoints
         from o3b.cv.visual.show import get_default_camera_intrinsics_from_img_size
 
+                
         batch = sample_uniform_viewpoints(n_views, mesh=self.mesh)
         modalities = render_mesh_from_viewpoints(batch, H=H, W=W, renderer=renderer)
 
         if self.obj_kpts3d is not None:
+            #print(self.obj_kpts3d.shape) 
+
             cam_tform4x4_obj = batch.cam_tform4x4_obj  # (B, 4, 4)
             B = cam_tform4x4_obj.shape[0]
             cam_intr4x4 = batch.cam_intr4x4
@@ -232,14 +236,15 @@ class Object:
 
             kpts3d = self.obj_kpts3d.float()       # (K, 3)
             K = kpts3d.shape[0]
-            kpts3d_h = torch.cat([kpts3d, torch.ones(K, 1)], dim=1)  # (K, 4)
-            kpts_cam = (cam_tform4x4_obj @ kpts3d_h.T).permute(0, 2, 1)  # (B, K, 4)
-            kpts_xyz = kpts_cam[..., :3]                                   # (B, K, 3)
-            kpts_proj = torch.bmm(cam_intr4x4[:, :3, :3],
-                                  kpts_xyz.permute(0, 2, 1)).permute(0, 2, 1)  # (B, K, 3)
-            z = kpts_proj[..., 2:3].clamp(min=1e-6)
-            kpts2d = kpts_proj[..., :2] / z  # (B, K, 2)  [u, v]
 
+            # pts3d (1,V,3), tform (N,1,4,4), intr (N,1,4,4) → (N,V,2)
+            kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
+                pts3d=kpts3d.unsqueeze(0),
+                tform4x4=cam_tform4x4_obj.unsqueeze(1),
+                intr4x4=cam_intr4x4.unsqueeze(1),
+            )      
+
+            #print(kpts2d.shape)
             modalities["rgb"] = _draw_kpts2d_on_imgs(
                 modalities["rgb"], kpts2d,
                 mask=self.obj_kpts3d_mask,

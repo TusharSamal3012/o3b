@@ -1390,6 +1390,38 @@ def add_homog_dim(pts, dim):
     ).to(device=device, dtype=dtype)
     return torch.cat([pts, ones1d], dim=dim)
 
+def proj3d2d_tform4x4_intr4x4(pts3d, tform4x4, intr4x4):
+    # opengl convention camera flips y,z axis from object to camera
+
+    intr4x4 = intr4x4.clone()
+    intr4x4[..., :, 1] = - intr4x4[..., :, 1]
+    intr4x4[..., :, 2] = - intr4x4[..., :, 2]   
+    
+    proj4x4 = torch.bmm(intr4x4.reshape(-1, 4, 4), tform4x4.reshape(-1, 4, 4)).reshape(
+        intr4x4.shape[:-2] + torch.Size([4, 4]),
+    )
+    return proj3d2d(pts3d=pts3d, proj4x4=proj4x4)
+
+def proj3d2d_tform4x4_intr4x4_broadcast(pts3d, tform4x4, intr4x4):
+    # opengl convention camera flips y,z axis from object to camera
+    intr4x4 = intr4x4.clone()
+    intr4x4[..., :, 1] = - intr4x4[..., :, 1]
+    intr4x4[..., :, 2] = - intr4x4[..., :, 2]
+
+    shape_first_dims = torch.broadcast_shapes(
+        pts3d.shape[:-1],
+        tform4x4.shape[:-2],
+        intr4x4.shape[:-2],
+    )
+
+    proj4x4 = torch.bmm(
+        intr4x4.expand(*shape_first_dims, 4, 4).reshape(-1, 4, 4),
+        tform4x4.expand(*shape_first_dims, 4, 4).reshape(-1, 4, 4),
+    ).reshape(shape_first_dims + torch.Size([4, 4]))
+    
+    pts3d = pts3d.expand(*shape_first_dims, 3)
+    
+    return proj3d2d(pts3d=pts3d, proj4x4=proj4x4)
 
 def proj3d2d(pts3d, proj4x4):
     device = pts3d.device
@@ -1399,7 +1431,10 @@ def proj3d2d(pts3d, proj4x4):
         dtype=dtype,
     )
     pts4d = torch.concatenate([pts3d, ones1d], dim=-1)
+    print(pts4d.shape)
     pts4d = pts4d.reshape(list(pts4d.shape) + [1])
+    print(pts4d.shape)
+    print(proj4x4.shape)
     pts4d_transf = torch.bmm(
         proj4x4.reshape(-1, 4, 4),
         pts4d.reshape(-1, 4, 1),
@@ -1409,6 +1444,9 @@ def proj3d2d(pts3d, proj4x4):
         dim=dim_coords3d,
         index=torch.LongTensor([0, 1, 2]).to(device=device),
     )
+
+    #pts3d_transf[..., 1, :] = -pts3d_transf[..., 1, :]
+
     pts2d_transf = pts3d_transf.index_select(
         dim=dim_coords3d,
         index=torch.LongTensor([0, 1]).to(device=device),
@@ -1419,6 +1457,15 @@ def proj3d2d(pts3d, proj4x4):
     )
     pts2d_transf_proj = pts2d_transf / (ptsZ_transf.abs() + 1e-10)
     pts2d_transf_proj = pts2d_transf_proj.squeeze(dim=-1)
+    
+    #pts2d_transf_proj[..., 0] = -pts2d_transf_proj[..., 0]
+    #pts2d_transf_proj[..., 1] = -pts2d_transf_proj[..., 1] + 2 * proj4x4[..., 1, 2]
+    #def project(pts_3d: Tensor, cam_t: Tensor):
+    #    pts_h   = torch.cat([pts_3d.float().cpu(), torch.ones(len(pts_3d), 1)], dim=1)
+    #    pts_cam = (cam_t @ pts_h.T).T[:, :3]
+    #    z = (-pts_cam[:, 2]).clamp(min=1e-6).numpy()
+    #    return fx * pts_cam[:, 0].numpy() / z + cx, fy * (-pts_cam[:, 1]).numpy() / z + cy
+
     return pts2d_transf_proj
 
 

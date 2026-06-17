@@ -149,9 +149,11 @@ def _extract_vert_feats(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    print(feature_model_name)
+    
     # ── Models that do their own rendering (diff3f, densematcher/dm) ────────────
     _SELF_RENDERING = {"diff3f", "dm", "dmmv"}
-    if feature_model_name.lower() in _SELF_RENDERING or "diff3f" in feature_model_name.lower():
+    if feature_model_name.lower() in _SELF_RENDERING:
         from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch
         model = OD3D_Model.create_by_name(feature_model_name)
@@ -189,28 +191,25 @@ def _extract_vert_feats(
     featmaps = frames_out.featmap  # (N, C, H_f, W_f)
 
     # ── 3. Project vertices onto each feature map ─────────────────────────────
+    from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+
     N = n_views
     verts = mesh.verts.float().to(device)                        # (V, 3)
     V = verts.shape[0]
-    verts_h = torch.cat([verts, torch.ones(V, 1, device=device)], dim=1)  # (V, 4)
 
     cam_tform4x4_obj = cam_tform4x4_obj.float().to(device)       # (N, 4, 4)
     cam_intr4x4      = cam_intr4x4.float().to(device)            # (N, 4, 4)
 
-    # (N, V, 4) camera-space homogeneous
-    verts_cam = torch.einsum("nij,vj->nvi", cam_tform4x4_obj, verts_h)
-    z = verts_cam[..., 2]                                        # (N, V)
-
-    # project with intrinsics
-    verts_proj = torch.einsum(
-        "nij,nvj->nvi", cam_intr4x4[:, :3, :3], verts_cam[..., :3]
-    )                                                             # (N, V, 3)
-    verts_2d = verts_proj[..., :2] / verts_proj[..., 2:3].clamp(min=1e-6)  # (N, V, 2) pixels
+    # pts3d (1,V,3), tform (N,1,4,4), intr (N,1,4,4) → (N,V,2)
+    verts_2d = proj3d2d_tform4x4_intr4x4_broadcast(
+        pts3d=verts.unsqueeze(0),
+        tform4x4=cam_tform4x4_obj.unsqueeze(1),
+        intr4x4=cam_intr4x4.unsqueeze(1),
+    )                                                             # (N, V, 2)
 
     # visibility: positive depth and within image bounds
     valid = (
-        (z > 0)
-        & (verts_2d[..., 0] >= 0) & (verts_2d[..., 0] <= W - 1)
+        (verts_2d[..., 0] >= 0) & (verts_2d[..., 0] <= W - 1)
         & (verts_2d[..., 1] >= 0) & (verts_2d[..., 1] <= H - 1)
     )                                                             # (N, V)
 

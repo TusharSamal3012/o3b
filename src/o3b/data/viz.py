@@ -3,6 +3,8 @@ import colorsys
 import time
 from typing import TYPE_CHECKING, Optional
 
+from o3b.data.datatypes.object import _draw_kpts2d_on_imgs
+
 if TYPE_CHECKING:
     from torch import Tensor
     from o3b.data.datatypes import Mesh, FrameObjectBatch
@@ -190,9 +192,76 @@ def visualize_dataset(
             if mesh is None:
                 continue
             batch_vp = _get_render_viewpoints(render_frames, mesh=mesh)
-            modalities = render_mesh_from_viewpoints(batch_vp, renderer=renderer)
+            
+            from o3b.cv.visual.show import get_default_camera_intrinsics_from_img_size
+            H, W = 512, 512
+            _intr  = get_default_camera_intrinsics_from_img_size(H=H, W=W)
+            batch_vp.cam_intr4x4 = _intr.unsqueeze(0).expand(batch_vp.cam_tform4x4_obj.shape[0], -1, -1)
+            modalities = render_mesh_from_viewpoints(batch_vp, renderer=renderer, H=H, W=W)
+            
             if modalities is None:
                 continue
+
+            # ── overlay projected keypoints ───────────────────────────────────
+            kpts3d   = getattr(item, "obj_kpts3d",      None)  # (K, 3) | None
+            kpts_mask = getattr(item, "obj_kpts3d_mask", None)  # (K,) bool | None
+            if kpts3d is not None and "rgb" in modalities:
+                from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+
+                _H, _W = modalities["rgb"].shape[-2], modalities["rgb"].shape[-1]
+                _cam_t = batch_vp.cam_tform4x4_obj.float()        # (N, 4, 4)
+                _N     = _cam_t.shape[0]
+                _intr  = _intr.unsqueeze(0).expand(_N, -1, -1).float()  # (N, 4, 4)
+
+                _kpts = kpts3d.float() if isinstance(kpts3d, torch.Tensor) else torch.tensor(kpts3d, dtype=torch.float32)
+                _K = _kpts.shape[0]
+
+                # (N, K, 2) pixel coords
+                _kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
+                    pts3d=_kpts.unsqueeze(0),
+                    tform4x4=_cam_t.unsqueeze(1),
+                    intr4x4=_intr.unsqueeze(1),
+                )
+
+                print(_kpts2d.shape)
+                print(_kpts2d)
+                modalities["rgb"] = _draw_kpts2d_on_imgs(
+                    modalities["rgb"], _kpts2d,
+                    mask=kpts_mask,
+                    radius=max(_H, _W) // 50,
+                )
+                
+                print(_kpts2d.shape)
+                # z in camera space for front-face check
+                #_kpts_h = torch.cat([_kpts, torch.ones(_K, 1)], dim=1)  # (K, 4)
+                #_z = torch.einsum("nj,kj->nk", _cam_t[:, 2, :], _kpts_h)  # (N, K)
+
+                _valid = (
+                    (_kpts2d[..., 0] >= 0) & (_kpts2d[..., 0] < _W)
+                    & (_kpts2d[..., 1] >= 0) & (_kpts2d[..., 1] < _H)
+                )
+                if kpts_mask is not None:
+                    _m = kpts_mask if isinstance(kpts_mask, torch.Tensor) else torch.tensor(kpts_mask)
+                    _valid = _valid & _m.bool().unsqueeze(0)
+
+                _r = 4
+                _rgb_kpts = modalities["rgb"].clone()
+                for _n in range(_N):
+                    for _k in range(_K):
+                        if not _valid[_n, _k]:
+                            continue
+                        _x = int(_kpts2d[_n, _k, 0].round().item())
+                        _y = int(_kpts2d[_n, _k, 1].round().item())
+                        _c = torch.tensor([
+                            (_k * 37  % 256) / 255.0,
+                            (_k * 97  % 256) / 255.0,
+                            (_k * 153 % 256) / 255.0,
+                        ])
+                        _y0, _y1 = max(0, _y - _r), min(_H, _y + _r + 1)
+                        _x0, _x1 = max(0, _x - _r), min(_W, _x + _r + 1)
+                        _rgb_kpts[_n, :, _y0:_y1, _x0:_x1] = _c[:, None, None]
+                modalities = {**modalities, "rgb_kpts": _rgb_kpts}
+
             keys = list(modalities.keys())
 
             def _to_strip(imgs):
