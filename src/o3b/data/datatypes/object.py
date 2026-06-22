@@ -159,6 +159,8 @@ class Object:
     verts3d_feats_mask:      Optional[Tensor] = None  # (V,) or (V, V) bool
     mesh:                    Optional[Mesh]   = None
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (4, 4)
+    obj_size_ncds:           Optional[float]  = None  # max NCDS bounding-box extent (= 2.0 when set)
+    obj_size:                Optional[float]  = None  # max bounding-box extent in real units
     obj_kpts3d:              Optional[Tensor] = None  # (K, 3)
     obj_kpts3d_mask:         Optional[Tensor] = None  # (K,)  bool
     obj_verts_part_id:       Optional[Tensor] = None  # (V,)  int64, -1 = unlabeled

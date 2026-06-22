@@ -8,7 +8,7 @@ defaults:
   - hc3d
   - _self_
 
-class_name: HouseCorr3DFrame
+class_name: HouseCorr3D
 
 
 # mesh_type: "mc16_vuni4_r256_fdinov2s"

@@ -74,10 +74,10 @@ def build_obj_cam_tform(obj: dict) -> list:
     # Omni6DPose stores cam_tform4x4_obj directly as (q, t) in camera space
     cam_tform4x4_obj = _tform4x4_from_quat_wxyz_and_transl(q, t)
 
-    # apply scale factor embedded in the rotation (see extract_meta)
+    # apply isotropic scale (mesh units → metres) to the rotation block
     scale = obj.get("meta", {}).get("scale", None)
     if scale is not None:
-        s = float(scale) if not isinstance(scale, (list, tuple)) else 1.0
+        s = float(scale[0]) if isinstance(scale, (list, tuple)) else float(scale)
         cam_tform4x4_obj[:3, :3] *= s
 
     return cam_tform4x4_obj.tolist()

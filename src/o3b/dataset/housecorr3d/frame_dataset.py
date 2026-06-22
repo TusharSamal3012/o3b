@@ -1,403 +1,347 @@
-"""HouseCorr3DFrame — per-frame, per-object dataset built on top of the
-raw Omni6DPose directory structure (ROPE for real, SOPE for synthetic).
+"""Helper functions for HouseCorr3D frame-object data.
 
-Each item is one valid object instance visible in one scene frame, returned as
-a FrameObject with rgb, depth, mask, cam_intr4x4, cam_tform4x4_obj, category.
-
-Index layout (frames.db):
-    frame_id         TEXT PRIMARY KEY  -- e.g. "real/scene001/0000/2"
-    scene_name       TEXT              -- e.g. "scene001" or "patch01_scene002"
-    object_idx       INTEGER           -- 0-based index within the frame's objects list
-    split            TEXT              -- "train" | "test"
-    data_type        TEXT              -- "real" | "synthetic"
-    category         TEXT
-    object_id        TEXT              -- oid, e.g. "omniobject3d-mug_001"
-    rgb_path         TEXT              -- relative to path_raw
-    depth_path       TEXT              -- relative to path_raw
-    mask_path        TEXT              -- relative to path_raw (exr with per-instance channels)
-    cam_intr4x4      TEXT              -- JSON 4x4
-    cam_tform4x4_obj TEXT              -- JSON 4x4  (camera-from-object SE3)
-    is_valid         INTEGER           -- 1 = valid
-
-Filtering via DatasetConfig:
-    split:           "train" | "test" | "all"   (default "train")
-    filter_is_real:  True  → real only  |  False → synthetic only (default False)
-    categories:      list[str] | None
-    filter_count_max: int | None
+Provides:
+  - _index_scene()           : insert one scene's frame-object rows into frames.db
+  - modality loaders         : _load_image_tensor, _load_depth_tensor, _load_mask_tensor
+  - viser visualization      : _visualize_frame_objects_viser and helpers
 """
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Optional
 
 import torch
 
-from o3b.dataset.dataset import register_dataset, ConfigurableDataset, DatasetConfig, ItemType
-from o3b.data.datatypes import FrameObject
+
+def _depth_to_pts3d_cam(
+    depth: torch.Tensor,       # (H, W) float32 metres
+    cam_intr4x4: torch.Tensor, # (4, 4)
+    subsample: int = 4,
+) -> torch.Tensor:
+    """Back-project depth to 3-D points in camera space.
+
+    OpenGL convention: −Z_cam forward, depth positive for visible points → Z < 0.
+    Returns (N, 3) float32 tensor (subsampled by `subsample`).
+    """
+    H, W = depth.shape
+    fx = cam_intr4x4[0, 0].item()
+    fy = cam_intr4x4[1, 1].item()
+    cx = cam_intr4x4[0, 2].item()
+    cy = cam_intr4x4[1, 2].item()
+
+    d = depth.float()[::subsample, ::subsample]  # (H', W')
+    valid = d > 0
+    if not valid.any():
+        return torch.zeros(0, 3)
+
+    Hp, Wp = d.shape
+    ys = torch.arange(0, H, subsample, dtype=torch.float32)[:Hp]
+    xs = torch.arange(0, W, subsample, dtype=torch.float32)[:Wp]
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+
+    X = (grid_x - cx) / fx * d
+    Y = (grid_y - cy) / fy * d
+    Z = -d  # OpenGL: camera looks in −Z, so visible points have Z < 0
+    pts = torch.stack([X, Y, Z], dim=-1).view(-1, 3)
+    return pts[valid.view(-1)]
 
 
-@register_dataset("HouseCorr3DFrame")
-class HouseCorr3DFrame(ConfigurableDataset):
+def _add_frustum_to_scene(
+    server,
+    cam_intr4x4: torch.Tensor,  # (4, 4)
+    H: int,
+    W: int,
+    name: str = "/frame/frustum",
+    color: tuple = (200, 200, 50),
+    scale: float = 0.3,
+) -> list:
+    """Add a camera frustum at the origin of the camera-space viser scene.
 
-    categories: tuple = ()   # populated from enum at module import
+    OpenGL convention: camera looks in −Z, so the frustum is rotated 180° around Y
+    so that viser's local +Z (the frustum-opening direction) maps to world −Z.
+    """
+    import math
 
-    @classmethod
-    def _path_raw(cls, cfg: DatasetConfig) -> Path:
-        return cfg.path_raw or cfg.root
+    fx  = cam_intr4x4[0, 0].item()
+    fov = 2.0 * math.atan(W / (2.0 * fx))
 
-    @classmethod
-    def _path_preprocess(cls, cfg: DatasetConfig) -> Path:
-        return cfg.path_preprocess or cfg.root
-
-    # ── setup ─────────────────────────────────────────────────────────────────
-
-    def __len__(self) -> int:
-        return len(self._frame_rows_id)
-
-    def _setup(self) -> None:
-        self._frame_rows: list[dict] = []
-        self._frame_rows_id: list[int] = []
-
-        db_path = self._path_preprocess(self.cfg) / "frames.db"
-        if not db_path.exists():
-            return
-
-        con = sqlite3.connect(f"file:{db_path}?immutable=1", uri=True, timeout=30)
-        con.row_factory = sqlite3.Row
-        try:
-            cur = con.cursor()
-            self._frame_rows = [dict(r) for r in cur.execute("SELECT * FROM frames").fetchall()]
-
-            split      = self.cfg.split or "train"
-            is_real    = self.cfg.filter_is_real
-            cats       = self.cfg.categories
-            limit      = self.cfg.filter_count_max
-            has_kpts   = self.cfg.filter_has_kpts
-
-            split_clause = "" if split == "all" else f" AND split = '{split}'"
-            if is_real is None:
-                real_clause = ""
-            elif is_real:
-                real_clause = " AND data_type = 'real'"
-            else:
-                real_clause = " AND data_type = 'synthetic'"
-            kpts_clause  = " AND has_kpts = 1" if has_kpts else ""
-            limit_clause = f" LIMIT {limit}" if limit else ""
-
-            if cats:
-                placeholders = ", ".join("?" * len(cats))
-                cat_clause   = f" AND category IN ({placeholders})"
-                params: list = list(cats)
-            else:
-                cat_clause, params = "", []
-
-            rows = cur.execute(
-                f"SELECT rowid FROM frames"
-                f" WHERE is_valid = 1{split_clause}{real_clause}{kpts_clause}{cat_clause}{limit_clause}",
-                params,
-            ).fetchall()
-            # rowid is 1-based; our list is 0-based
-            self._frame_rows_id = [r[0] - 1 for r in rows]
-        finally:
-            con.close()
-
-    # ── item loading ──────────────────────────────────────────────────────────
-
-    def _load_frame_object(self, idx: int) -> FrameObject:
-        row = self._frame_rows[self._frame_rows_id[idx]]
-
-        path_raw = self._path_raw(self.cfg)
-        mods     = self.cfg.modalities  # None = all
-
-        def _want(name: str) -> bool:
-            return mods is None or name in mods
-
-        rgb = None
-        if _want("rgb") and row.get("rgb_path"):
-            rgb = _load_image_tensor(path_raw / row["rgb_path"])
-
-        depth = None
-        if _want("depth") and row.get("depth_path"):
-            depth = _load_depth_tensor(path_raw / row["depth_path"])
-
-        depth_mask = None
-        if _want("depth_mask") and depth is not None:
-            depth_mask = (depth > 0)
-
-        mask = None
-        if _want("fo_mask") and row.get("mask_path") and row.get("mask_id") is not None:
-            mask = _load_mask_tensor(path_raw / row["mask_path"], int(row["mask_id"]))
-
-        cam_intr4x4 = None
-        if _want("cam_intr4x4") and row.get("cam_intr4x4"):
-            cam_intr4x4 = torch.tensor(json.loads(row["cam_intr4x4"]), dtype=torch.float32)
-
-        cam_tform4x4_obj = None
-        if _want("cam_tform4x4_obj") and row.get("cam_tform4x4_obj"):
-            cam_tform4x4_obj = torch.tensor(
-                json.loads(row["cam_tform4x4_obj"]), dtype=torch.float32
-            )
-
-        # cam_bbox2d: derive from fo_mask (xyxy pixel bbox)
-        cam_bbox2d = None
-        if _want("cam_bbox2d") and mask is not None:
-            from o3b.cv.visual.draw import get_bboxs_from_masks
-            cam_bbox2d = get_bboxs_from_masks(mask[None])[0].float()  # (4,) xyxy
-
-        # cam_bbox3d: stored as (3,) obj-space side lengths for use with draw_bbox3d
-        cam_bbox3d = None
-        if _want("cam_bbox3d") and row.get("obj_size3d"):
-            cam_bbox3d = torch.tensor(json.loads(row["obj_size3d"]), dtype=torch.float32)
-
-        # obj_kpts3d / obj_kpts3d_mask: load from preprocess dir, scale mesh-units → metres
-        obj_kpts3d      = None
-        obj_kpts3d_mask = None
-        if _want("obj_kpts3d"):
-            oid        = row.get("object_id", "")
-            kpts_path  = self._path_preprocess(self.cfg) / "obj_kpts3d" / oid / "kpts3d.pt"
-            if kpts_path.exists():
-                try:
-                    data      = torch.load(kpts_path, weights_only=True)  # (K, 4)
-                    obj_scale = float(row.get("obj_scale") or 1.0)
-                    obj_kpts3d = data[:, :3] * obj_scale               # (K, 3) in metres
-                    if _want("obj_kpts3d_mask"):
-                        obj_kpts3d_mask = data[:, 3] > 0.5             # (K,) bool
-                except Exception:
-                    pass
-
-        category    = row.get("category") if _want("category") else None
-        object_id   = row.get("object_id", "")
-        frame_id    = row.get("frame_id", "")
-
-        return FrameObject(
-            frame_id         = frame_id,
-            frame_object_id  = frame_id,
-            object_id        = object_id,
-            rgb              = rgb,
-            depth            = depth,
-            depth_mask       = depth_mask,
-            fo_mask          = mask,
-            cam_intr4x4      = cam_intr4x4,
-            cam_tform4x4_obj = cam_tform4x4_obj,
-            cam_bbox2d       = cam_bbox2d,
-            cam_bbox3d       = cam_bbox3d,
-            obj_kpts3d       = obj_kpts3d,
-            obj_kpts3d_mask  = obj_kpts3d_mask,
-            category         = category,
+    handles = []
+    try:
+        h = server.scene.add_camera_frustum(
+            name,
+            fov=fov,
+            aspect=W / H,
+            scale=scale,
+            wxyz=(0.0, 0.0, 1.0, 0.0),  # 180° around Y: local +Z → world −Z
+            position=(0.0, 0.0, 0.0),
+            color=color,
         )
+        handles.append(h)
+    except Exception:
+        pass
+    return handles
 
-    # ── CLI hooks ─────────────────────────────────────────────────────────────
 
-    @classmethod
-    def fetch(cls, cfg: DatasetConfig, *, url: Optional[str] = None) -> None:
-        from o3b.dataset.housecorr3d.dataset import HouseCorr3D
-        HouseCorr3D.fetch(cfg, url=url)
+def _add_rgb_image_to_scene(
+    server,
+    rgb: torch.Tensor,          # (3, H, W) float32 [0, 1]
+    cam_intr4x4: torch.Tensor,  # (4, 4)
+    depth: Optional[torch.Tensor],  # (H, W) or None
+    name: str = "/frame/rgb",
+) -> Optional[object]:
+    """Add the RGB image as a flat panel in camera space at median scene depth."""
+    H_img, W_img = rgb.shape[1], rgb.shape[2]
+    fx = cam_intr4x4[0, 0].item()
+    fy = cam_intr4x4[1, 1].item()
+    cx = cam_intr4x4[0, 2].item()
+    cy = cam_intr4x4[1, 2].item()
 
-    @classmethod
-    def index(
-        cls,
-        cfg: DatasetConfig,
-        *,
-        db: Optional[Path] = None,
-        remove: bool = False,
-        max_index: Optional[int] = None,
-    ) -> None:
-        path_raw        = cls._path_raw(cfg)
-        path_preprocess = cls._path_preprocess(cfg)
-        db_path         = db or path_preprocess / "frames.db"
-        # filter_count_max stops indexing once this many filter-matching rows are found.
-        # --max (max_index) is an unconditional override (for quick testing without a yaml edit).
-        limit       = max_index or cfg.filter_count_max  # None = index everything
-        filter_kpts = cfg.filter_has_kpts                # only count kpts rows toward limit
-        is_real     = cfg.filter_is_real                 # None = both, True = real only, False = synthetic
-        kpts_preprocess = path_preprocess / "obj_kpts3d"
+    if depth is not None:
+        d_vals = depth[depth > 0]
+        d_place = float(d_vals.median()) if d_vals.numel() > 0 else 1.0
+    else:
+        d_place = 1.0
 
-        print(f"path_raw        : {path_raw}")
-        print(f"path_preprocess : {path_preprocess}")
-        print(f"db              : {db_path}")
-        if limit:
-            kpts_note = " (kpts rows only)" if filter_kpts else ""
-            print(f"filter_count_max: {limit}{kpts_note}  — indexing stops after this many matching rows")
-        if is_real is not None:
-            print(f"filter_is_real  : {is_real}  ({'real (ROPE) only' if is_real else 'synthetic (SOPE) only'})")
+    render_w = W_img * d_place / fx
+    render_h = H_img * d_place / fy
 
-        rope_root = path_raw / "ROPE"
-        sope_root = path_raw / "SOPE"
+    # image-plane centre in camera space (principal-point offset)
+    cx_cam = (W_img / 2.0 - cx) / fx * d_place
+    cy_cam = (H_img / 2.0 - cy) / fy * d_place
 
-        if not rope_root.exists() and not sope_root.exists():
-            print(
-                f"ERROR: neither {rope_root} nor {sope_root} found. "
-                "Run 'fetch' first.",
-                file=sys.stderr,
+    img_np = (rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+    try:
+        h = server.scene.add_image(
+            name,
+            image=img_np,
+            render_width=float(render_w),
+            render_height=float(render_h),
+            wxyz=(1.0, 0.0, 0.0, 0.0),  # identity; panel at −Z is visible from +Z (camera origin)
+            position=(float(cx_cam), float(cy_cam), float(-d_place)),
+        )
+        return h
+    except Exception:
+        return None
+
+
+def _rot3x3_to_wxyz(R: torch.Tensor) -> tuple:
+    """Convert a 3×3 rotation matrix to a wxyz unit quaternion."""
+    m = R.cpu().numpy().astype(float)
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0:
+        s = 0.5 / (trace + 1.0) ** 0.5
+        w, x = 0.25 / s, (m[2, 1] - m[1, 2]) * s
+        y, z = (m[0, 2] - m[2, 0]) * s, (m[1, 0] - m[0, 1]) * s
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = 2.0 * (1.0 + m[0, 0] - m[1, 1] - m[2, 2]) ** 0.5
+        w, x = (m[2, 1] - m[1, 2]) / s, 0.25 * s
+        y, z = (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = 2.0 * (1.0 + m[1, 1] - m[0, 0] - m[2, 2]) ** 0.5
+        w, x = (m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s
+        y, z = 0.25 * s, (m[1, 2] + m[2, 1]) / s
+    else:
+        s = 2.0 * (1.0 + m[2, 2] - m[0, 0] - m[1, 1]) ** 0.5
+        w, x = (m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s
+        y, z = (m[1, 2] + m[2, 1]) / s, 0.25 * s
+    return (float(w), float(x), float(y), float(z))
+
+
+def _add_axes_to_scene(
+    server,
+    name: str,
+    tform4x4: torch.Tensor,   # (4, 4) with possible isotropic scale in [:3, :3]
+    axes_length: float = 0.1,
+    axes_radius: float = 0.005,
+    labels: tuple = ("right", "top", "back"),  # X, Y, Z tip labels
+) -> list:
+    """Add a coordinate frame (X=red, Y=green, Z=blue) with axis-tip text labels.
+
+    The rotation block may carry an isotropic scale; SVD strips it before
+    computing the quaternion.  Returns a list of viser handles.
+    """
+    U, _, Vh = torch.linalg.svd(tform4x4[:3, :3].float())
+    wxyz     = _rot3x3_to_wxyz(U @ Vh)
+    position = tuple(float(v) for v in tform4x4[:3, 3].float().cpu())
+
+    result = []
+    try:
+        h = server.scene.add_frame(
+            name, wxyz=wxyz, position=position,
+            axes_length=axes_length, axes_radius=axes_radius,
+        )
+        result.append(h)
+    except Exception:
+        pass
+
+    # Labels are children of the frame node, so positions are in the frame's LOCAL
+    # coordinate system — viser applies the parent transform automatically.
+    _colors  = [(220, 50, 50), (50, 200, 50), (50, 50, 220)]  # R, G, B
+    _keys    = ("x", "y", "z")
+    _offsets = [(axes_length, 0.0, 0.0), (0.0, axes_length, 0.0), (0.0, 0.0, axes_length)]
+    for key, text, color, local_pos in zip(_keys, labels, _colors, _offsets):
+        try:
+            h = server.scene.add_label(
+                f"{name}/lbl_{key}", text, position=local_pos, color=color,
             )
-            sys.exit(1)
+            result.append(h)
+        except TypeError:
+            try:
+                h = server.scene.add_label(f"{name}/lbl_{key}", text, position=local_pos)
+                result.append(h)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        if remove and db_path.exists():
-            db_path.unlink()
-            print(f"Removed existing index: {db_path}")
-        # Remove stale WAL/SHM files so we get a clean exclusive lock immediately.
-        for suffix in ("-wal", "-shm"):
-            stale = db_path.with_name(db_path.name + suffix)
-            stale.unlink(missing_ok=True)
-        con = sqlite3.connect(db_path, timeout=60)
-        cur = con.cursor()
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("DROP TABLE IF EXISTS frames")
-        cur.execute("""
-            CREATE TABLE frames (
-                frame_id         TEXT PRIMARY KEY,
-                scene_name       TEXT    NOT NULL,
-                object_idx       INTEGER NOT NULL,
-                mask_id          INTEGER,
-                split            TEXT    NOT NULL,
-                data_type        TEXT    NOT NULL,
-                category         TEXT,
-                object_id        TEXT,
-                rgb_path         TEXT,
-                depth_path       TEXT,
-                mask_path        TEXT,
-                cam_intr4x4      TEXT,
-                cam_tform4x4_obj TEXT,
-                obj_size3d       TEXT,
-                obj_scale        REAL,
-                has_kpts         INTEGER DEFAULT 0,
-                is_valid         INTEGER DEFAULT 1
-            )
-        """)
+    return result
 
-        from tqdm import tqdm
 
-        COMMIT_EVERY = 50  # flush to disk every N scenes
-        total_rows   = 0   # all rows inserted
-        matched      = 0   # rows matching the index-time filter (used for limit check)
-        scenes_since_commit = 0
-        done  = False
+def _add_depth_pc_to_scene(
+    server,
+    depth: torch.Tensor,
+    rgb: Optional[torch.Tensor],
+    cam_intr4x4: torch.Tensor,
+    name: str = "/frame/depth_pc",
+    subsample: int = 4,
+) -> Optional[object]:
+    """Back-project depth to camera space and add as a coloured point cloud."""
+    import numpy as np
 
-        def _remaining():
-            """Remaining matching rows allowed in the current scene."""
-            return (limit - matched) if limit else None
+    pts = _depth_to_pts3d_cam(depth, cam_intr4x4, subsample=subsample)
+    if pts.shape[0] == 0:
+        return None
 
-        def _update(n_total: int, n_match: int) -> bool:
-            """Update counters; return True when the limit has been reached."""
-            nonlocal total_rows, matched, scenes_since_commit
-            total_rows += n_total
-            matched    += n_match
-            scenes_since_commit += 1
-            if scenes_since_commit >= COMMIT_EVERY:
-                con.commit()
-                scenes_since_commit = 0
-            return bool(limit and matched >= limit)
+    pts_np = pts.cpu().numpy()
 
-        # ── real data: ROPE (always test split) ───────────────────────────────
-        if rope_root.exists() and not done and is_real is not False:
-            scene_dirs = sorted(d for d in rope_root.iterdir() if d.is_dir())
-            print(f"\nIndexing ROPE ({len(scene_dirs)} scenes, split=test, data_type=real)")
-            bar = tqdm(scene_dirs, unit="scene", desc="ROPE")
-            for scene_dir in bar:
-                n_total, n_match = _index_scene(
-                    cur             = cur,
-                    scene_dir       = scene_dir,
-                    scene_name      = scene_dir.name,
-                    split           = "test",
-                    data_type       = "real",
-                    path_raw        = path_raw,
-                    kpts_preprocess = kpts_preprocess,
-                    limit           = _remaining(),
-                    filter_kpts     = filter_kpts,
-                )
-                bar.set_postfix(rows=total_rows, matched=matched)
-                if _update(n_total, n_match):
-                    done = True
-                    bar.close()
-                    break
+    if rgb is not None:
+        H, W = depth.shape
+        d_sub = depth[::subsample, ::subsample]
+        valid = (d_sub > 0).view(-1)
+        ys = torch.arange(0, H, subsample)[:d_sub.shape[0]]
+        xs = torch.arange(0, W, subsample)[:d_sub.shape[1]]
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        y_idx = grid_y.reshape(-1)[valid].long().clamp(0, H - 1)
+        x_idx = grid_x.reshape(-1)[valid].long().clamp(0, W - 1)
+        colors_np = rgb[:, y_idx, x_idx].permute(1, 0).cpu().numpy()  # (N, 3)
+    else:
+        colors_np = np.full((pts_np.shape[0], 3), 0.6, dtype=np.float32)
 
-        # ── synthetic data: SOPE ─────────────────────────────────────────────
-        if sope_root.exists() and not done and is_real is not True:
-            patch_dirs = sorted(d for d in sope_root.iterdir() if d.is_dir())
-            print(f"\nIndexing SOPE ({len(patch_dirs)} patches, data_type=synthetic)")
+    try:
+        h = server.scene.add_point_cloud(
+            name,
+            points=pts_np,
+            colors=colors_np,
+            point_size=0.003,
+        )
+        return h
+    except Exception:
+        return None
 
-            def _sope_scenes():
-                """Yield (scene_dir, scene_name, split_name) lazily — no upfront NFS scan."""
-                for patch_dir in patch_dirs:
-                    for split_name in ("train", "test"):
-                        split_dir = patch_dir / split_name
-                        if not split_dir.exists():
-                            continue
-                        for kind_dir in sorted(d for d in split_dir.iterdir() if d.is_dir()):
-                            for scene_dir in sorted(d for d in kind_dir.iterdir() if d.is_dir()):
-                                yield scene_dir, f"{patch_dir.name}_{scene_dir.name}", split_name
 
-            bar = tqdm(_sope_scenes(), unit="scene", desc="SOPE")
-            for scene_dir, scene_name, split_name in bar:
-                n_total, n_match = _index_scene(
-                    cur             = cur,
-                    scene_dir       = scene_dir,
-                    scene_name      = scene_name,
-                    split           = split_name,
-                    data_type       = "synthetic",
-                    path_raw        = path_raw,
-                    kpts_preprocess = kpts_preprocess,
-                    limit           = _remaining(),
-                    filter_kpts     = filter_kpts,
-                )
-                bar.set_postfix(rows=total_rows, matched=matched)
-                if _update(n_total, n_match):
-                    bar.close()
-                    break
+def _visualize_frame_objects_viser(dataset, debug: bool = False) -> None:
+    """Interactive viser browser for HouseCorr3D frame-object items.
 
-        con.commit()
-        con.close()
-        print(f"\nDone. {total_rows} rows indexed ({matched} matching filter) → {db_path}")
+    The scene is in camera space (camera at origin, +Z forward).
+    Each frame shows:
+      • object mesh transformed to camera space via cam_tform4x4_obj_ncds
+        (NCDS → cam; incorporates both rotation and per-object metric scale)
+      • camera frustum at the origin
+      • RGB image panel at median depth
+      • depth point cloud coloured by RGB
+    """
+    import time
 
-    @classmethod
-    def visualize(
-        cls,
-        cfg: DatasetConfig,
-        *,
-        db: Optional[Path] = None,
-        limit: int = 20,
-        object_id: Optional[str] = None,
-        render: bool = False,
-        render_frames: int = 0,
-        renderer: str = "pyrender",
-        debug: bool = False,
-        **_,
-    ) -> None:
-        path_preprocess = cls._path_preprocess(cfg)
-        db_path = db or path_preprocess / "frames.db"
-        if not db_path.exists():
-            print(f"No index found at {db_path}. Run 'index' first.", file=sys.stderr)
-            sys.exit(1)
+    try:
+        import viser
+    except ImportError:
+        print("Install viser: pip install viser")
+        return
 
-        dataset = cls(cfg)
-        if not dataset._frame_rows_id:
-            print("No frames found matching the current config filters.")
-            return
+    server = viser.ViserServer()
+    server.scene.add_light_ambient("/ambient", intensity=3.0)
 
-        total = len(dataset._frame_rows_id)
-        if object_id:
-            dataset._frame_rows_id = [
-                i for i in dataset._frame_rows_id
-                if dataset._frame_rows[i].get("object_id") == object_id
-            ]
-        if limit < len(dataset._frame_rows_id):
-            dataset._frame_rows_id = dataset._frame_rows_id[:limit]
+    n = len(dataset._frame_rows_id)
+    idx     = [0]
+    handles: list = []
 
-        print(f"Showing {len(dataset._frame_rows_id)} / {total} frames  {db_path}\n")
-        for seq_idx, i in enumerate(dataset._frame_rows_id):
-            row = dataset._frame_rows[i]
-            print(
-                f"[{seq_idx + 1}/{len(dataset._frame_rows_id)}]"
-                f"  {row['frame_id']:<60}"
-                f"  cat={row.get('category','?'):<20}"
-                f"  split={row['split']}  {row['data_type']}"
-            )
-            fo = dataset._load_frame_object(seq_idx)
-            fo.viz(show=True)
+    def _clear() -> None:
+        for h in handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        handles.clear()
+
+    def _load(i: int) -> None:
+        _clear()
+        # Load with all modalities (dataset cfg already has modalities=None for viz)
+        fo = dataset._load_frame_object(i)
+
+        H_img = fo.rgb.shape[1] if fo.rgb is not None else 480
+        W_img = fo.rgb.shape[2] if fo.rgb is not None else 640
+
+        # Camera coordinate axes at origin (X=red, Y=green, Z=blue)
+        handles.extend(_add_axes_to_scene(server, "/camera/axes", torch.eye(4),
+                                          axes_length=0.15, axes_radius=0.006))
+
+        # Mesh in camera space: fo.mesh is in NCDS; cam_tform4x4_obj_ncds maps NCDS→cam
+        if fo.mesh is not None and fo.cam_tform4x4_obj_ncds is not None:
+            fo_cam = fo.transform(fo.cam_tform4x4_obj_ncds)
+            hs = fo_cam._build_scene_handles(server, "/object", (0.0, 0.0, 0.0))
+            handles.extend(h for h in hs.values() if h is not None)
+
+        # Object coordinate axes: position = object center in cam space, orientation = R_obj
+        if fo.cam_tform4x4_obj_ncds is not None:
+            ax_len = max(0.05, float(fo.obj_size or 0.2) * 0.75)
+            handles.extend(_add_axes_to_scene(server, "/object/axes", fo.cam_tform4x4_obj_ncds,
+                                              axes_length=ax_len, axes_radius=ax_len * 0.04))
+
+        if fo.cam_intr4x4 is not None:
+            handles.extend(_add_frustum_to_scene(server, fo.cam_intr4x4, H=H_img, W=W_img))
+
+            if fo.rgb is not None:
+                h = _add_rgb_image_to_scene(server, fo.rgb, fo.cam_intr4x4, depth=fo.depth)
+                if h is not None:
+                    handles.append(h)
+
+            if fo.depth is not None:
+                h = _add_depth_pc_to_scene(server, fo.depth, fo.rgb, fo.cam_intr4x4)
+                if h is not None:
+                    handles.append(h)
+
+        row = dataset._frame_rows[dataset._frame_rows_id[i]]
+        cat = row.get("category", "")
+        fid = row.get("frame_id", str(i))
+        label.value = f"[{i + 1}/{n}]  {fid}  cat={cat}"
+        print(f"  [{i + 1}/{n}] {fid}  cat={cat}")
+
+    with server.gui.add_folder("Navigation"):
+        label    = server.gui.add_text("Item",   initial_value="loading…")
+        btn_prev = server.gui.add_button("← Prev")
+        btn_next = server.gui.add_button("Next →")
+
+    @btn_prev.on_click
+    def _(_):
+        idx[0] = (idx[0] - 1) % n
+        _load(idx[0])
+
+    @btn_next.on_click
+    def _(_):
+        idx[0] = (idx[0] + 1) % n
+        _load(idx[0])
+
+    _load(0)
+    print(f"\nViser running at http://localhost:{server.get_port()}")
+    print("Use Prev / Next in the panel to browse. Press Ctrl+C to exit.\n")
+
+    try:
+        while True:
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("\nStopping.")
 
 
 # ── indexing helpers ──────────────────────────────────────────────────────────

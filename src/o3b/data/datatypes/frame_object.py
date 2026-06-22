@@ -14,7 +14,8 @@ class FrameObject(Frame, Object):
     cam_bbox2d:       Optional[Tensor] = None  # (4,)     xyxy pixels
     cam_bbox3d:       Optional[Tensor] = None  # (3,) obj-space side lengths for draw_bbox3d, or (8, 3) cam-space corners
     fo_mask:          Optional[Tensor] = None  # (H, W)   bool  object-instance mask
-    cam_tform4x4_obj: Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
+    cam_tform4x4_obj:      Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
+    cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (4, 4)  ncds→cam (= cam_tform4x4_obj @ obj_ncds0c_tform4x4_obj)
 
     def viz(self, show: bool = True) -> Optional[Tensor]:
         """Interactive overlay viewer with CheckButtons to toggle modalities.
