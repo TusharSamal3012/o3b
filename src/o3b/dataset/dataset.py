@@ -61,7 +61,9 @@ class DatasetConfig:
     filter_is_real:    Optional[bool]        = None   # None = all, True = real only, False = synthetic only
     filter_score_zero: bool                  = False  # OpenTT: drop clips where both scores == 0
     # dataset-wide rigid transform applied to every loaded object (4x4, R|t convention)
-    obj_tform4x4:      Optional[list]        = None   # [[r00,r01,r02,tx],[...],[...],[0,0,0,1]]
+    obj_tform4x4:          Optional[list]    = None   # [[r00,r01,r02,tx],[...],[...],[0,0,0,1]]
+    # camera-convention transform: left-multiplies cam_tform4x4_obj_raw (e.g. CV→OpenGL flip)
+    cam_tform4x4_cam_raw:  Optional[list]    = None   # [[r00,...],[...],[...],[0,0,0,1]]
 
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
@@ -87,7 +89,8 @@ class DatasetConfig:
             "filter_has_kpts":    self.filter_has_kpts,
             "filter_is_real":     self.filter_is_real,
             "filter_score_zero":  self.filter_score_zero,
-            "obj_tform4x4":      self.obj_tform4x4,
+            "obj_tform4x4":         self.obj_tform4x4,
+            "cam_tform4x4_cam_raw": self.cam_tform4x4_cam_raw,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -113,7 +116,8 @@ class DatasetConfig:
             filter_is_real    = None if "filter_is_real" not in d or d["filter_is_real"] is None
                                  else bool(d["filter_is_real"]),
             filter_score_zero = bool(d.get("filter_score_zero", False)),
-            obj_tform4x4     = d.get("obj_tform4x4"),
+            obj_tform4x4         = d.get("obj_tform4x4"),
+            cam_tform4x4_cam_raw = d.get("cam_tform4x4_cam_raw"),
             extra           = d.get("extra", {}),
         )
 

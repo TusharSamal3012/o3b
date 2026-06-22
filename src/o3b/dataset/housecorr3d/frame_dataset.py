@@ -41,8 +41,8 @@ def _depth_to_pts3d_cam(
     xs = torch.arange(0, W, subsample, dtype=torch.float32)[:Wp]
     grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
 
-    X = (grid_x - cx) / fx * d
-    Y = (grid_y - cy) / fy * d
+    X =  (grid_x - cx) / fx * d
+    Y = -(grid_y - cy) / fy * d  # image Y↓ → camera Y↑
     Z = -d  # OpenGL: camera looks in −Z, so visible points have Z < 0
     pts = torch.stack([X, Y, Z], dim=-1).view(-1, 3)
     return pts[valid.view(-1)]
@@ -107,11 +107,12 @@ def _add_rgb_image_to_scene(
     render_w = W_img * d_place / fx
     render_h = H_img * d_place / fy
 
-    # image-plane centre in camera space (principal-point offset)
-    cx_cam = (W_img / 2.0 - cx) / fx * d_place
-    cy_cam = (H_img / 2.0 - cy) / fy * d_place
+    # image-plane centre in camera space (principal-point offset, Y flipped: image↓ → cam↑)
+    cx_cam =  (W_img / 2.0 - cx) / fx * d_place
+    cy_cam = -(H_img / 2.0 - cy) / fy * d_place
 
-    img_np = (rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+    # flip image vertically so pixel rows go bottom→top in 3D (matching camera Y↑)
+    img_np = (rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")[::-1].copy()
     try:
         h = server.scene.add_image(
             name,

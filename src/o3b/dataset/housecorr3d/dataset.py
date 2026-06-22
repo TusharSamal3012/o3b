@@ -739,7 +739,13 @@ class HouseCorr3D(ConfigurableDataset):
         # Always load — needed for cam_tform4x4_obj_ncds even when not directly requested.
         cam_tform4x4_obj_raw = (torch.tensor(json.loads(row["cam_tform4x4_obj"]), dtype=torch.float32)
                                 if row.get("cam_tform4x4_obj") else None)
-        
+        #if cam_tform4x4_obj_raw is not None and self.cfg.obj_tform4x4 is not None:
+        #    T_inv = torch.linalg.inv(torch.tensor(self.cfg.obj_tform4x4, dtype=torch.float32))
+        #    cam_tform4x4_obj_raw = cam_tform4x4_obj_raw @ T_inv
+        if cam_tform4x4_obj_raw is not None and self.cfg.cam_tform4x4_cam_raw is not None:
+            C = torch.tensor(self.cfg.cam_tform4x4_cam_raw, dtype=torch.float32)
+            cam_tform4x4_obj_raw = C @ cam_tform4x4_obj_raw
+
         cam_bbox2d = None
         if _want("cam_bbox2d", mods) and mask is not None:
             from o3b.cv.visual.draw import get_bboxs_from_masks
