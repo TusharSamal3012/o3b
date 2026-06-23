@@ -133,6 +133,8 @@ def main(argv=None) -> None:
                        help="Renderer backend for --render-frames (default: pyrender)")
     p_vis.add_argument("--debug", action="store_true",
                        help="Show front/top/right camera frustums in the viser scene")
+    p_vis.add_argument("--object-centric", action="store_true",
+                       help="Object-centric view: place object at world origin, camera in object space")
 
     args = parser.parse_args(argv)
     overrides = _platform_to_dataset_overrides(args.platform)
@@ -157,6 +159,7 @@ def main(argv=None) -> None:
             render_frames=args.render_frames,
             renderer=args.renderer,
             debug=args.debug,
+            obj_centric=args.object_centric,
         )
 
 

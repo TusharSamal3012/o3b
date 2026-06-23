@@ -74,6 +74,8 @@ def _build_dataset_parser(sub):
     p_vis.add_argument("--renderer", choices=["pyrender", "nvdiffrast"], default="pyrender")
     p_vis.add_argument("--debug", action="store_true",
                        help="Show front/top/right camera frustums in the viser scene")
+    p_vis.add_argument("--object-centric", action="store_true",
+                       help="Object-centric view: place object at world origin, camera in object space")
 
     p_tform = ds_sub.add_parser(
         "tform",
@@ -148,6 +150,7 @@ def _run_dataset(args):
             render_frames=args.render_frames,
             renderer=args.renderer,
             debug=args.debug,
+            obj_centric=args.object_centric,
         )
     elif args.dataset_command == "tform":
         from o3b.dataset.tform import run_tform_viewer

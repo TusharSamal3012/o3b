@@ -1649,9 +1649,10 @@ def cam_intr4x4_2_center_ray3d(cam_intr4x4, size):
     pts3d = pts3d[..., 0, 0]
     return pts3d
 
-def depth2pts3d_grid(depth, cam_intr4x4):
+def depth2pts3d_grid(depth, cam_intr4x4, opengl: bool = False):
     #  depth: ...x1xHxW
     #  cam_intr: ...x4x4
+    #  opengl: if True, flip Y and Z to convert CV (+Z forward, Y down) → OpenGL (-Z forward, Y up)
     device = cam_intr4x4.device
     dtype = cam_intr4x4.dtype
     H, W = depth.shape[-2:]
@@ -1675,6 +1676,9 @@ def depth2pts3d_grid(depth, cam_intr4x4):
         H,
         W,
     )
+    if opengl:
+        flip = pts3d.new_tensor([1., -1., -1.]).view(*([1] * (pts3d.dim() - 3)), 3, 1, 1)
+        pts3d = pts3d * flip
     return pts3d
 
 def cam_intr4x4_to_cam_intr_ncdsv2_4x4(cam_intr4x4, size):

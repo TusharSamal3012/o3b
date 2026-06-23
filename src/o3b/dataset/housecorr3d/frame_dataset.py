@@ -20,32 +20,21 @@ def _depth_to_pts3d_cam(
     cam_intr4x4: torch.Tensor, # (4, 4)
     subsample: int = 4,
 ) -> torch.Tensor:
-    """Back-project depth to 3-D points in camera space.
+    """Back-project depth to 3-D points in OpenGL camera space via depth2pts3d_grid.
 
-    OpenGL convention: −Z_cam forward, depth positive for visible points → Z < 0.
-    Returns (N, 3) float32 tensor (subsampled by `subsample`).
+    Back-projects at full resolution so intrinsics remain correct, then subsamples.
+    Returns (N, 3) float32 tensor.
     """
-    H, W = depth.shape
-    fx = cam_intr4x4[0, 0].item()
-    fy = cam_intr4x4[1, 1].item()
-    cx = cam_intr4x4[0, 2].item()
-    cy = cam_intr4x4[1, 2].item()
+    from o3b.cv.geometry.transform import depth2pts3d_grid
 
-    d = depth.float()[::subsample, ::subsample]  # (H', W')
-    valid = d > 0
+    d = depth.float()
+    pts3d = depth2pts3d_grid(d[None, None], cam_intr4x4[None].float(), opengl=True)[0]  # 3×H×W
+
+    pts3d_sub = pts3d[:, ::subsample, ::subsample]  # 3×H'×W'
+    valid     = (d[::subsample, ::subsample] > 0).view(-1)
     if not valid.any():
         return torch.zeros(0, 3)
-
-    Hp, Wp = d.shape
-    ys = torch.arange(0, H, subsample, dtype=torch.float32)[:Hp]
-    xs = torch.arange(0, W, subsample, dtype=torch.float32)[:Wp]
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-
-    X =  (grid_x - cx) / fx * d
-    Y = -(grid_y - cy) / fy * d  # image Y↓ → camera Y↑
-    Z = -d  # OpenGL: camera looks in −Z, so visible points have Z < 0
-    pts = torch.stack([X, Y, Z], dim=-1).view(-1, 3)
-    return pts[valid.view(-1)]
+    return pts3d_sub.reshape(3, -1).T[valid]  # (N, 3)
 
 
 def _add_frustum_to_scene(
@@ -56,16 +45,30 @@ def _add_frustum_to_scene(
     name: str = "/frame/frustum",
     color: tuple = (200, 200, 50),
     scale: float = 0.3,
+    world_tform4x4_cam: "Optional[torch.Tensor]" = None,
 ) -> list:
-    """Add a camera frustum at the origin of the camera-space viser scene.
+    """Add a camera frustum in the viser scene.
 
-    OpenGL convention: camera looks in −Z, so the frustum is rotated 180° around Y
-    so that viser's local +Z (the frustum-opening direction) maps to world −Z.
+    If world_tform4x4_cam is None the frustum is placed at the origin (camera-centric).
+    Otherwise it is placed at the camera's pose in world/object space.
+
+    OpenGL convention: camera looks in −Z; the 180° Y rotation maps viser's local +Z
+    (frustum-opening direction) to −Z.  In world/object mode the same flip is composed
+    with the camera's world rotation.
     """
     import math
 
     fx  = cam_intr4x4[0, 0].item()
     fov = 2.0 * math.atan(W / (2.0 * fx))
+
+    if world_tform4x4_cam is not None:
+        _rot_180y = torch.tensor([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]])
+        R_world = world_tform4x4_cam[:3, :3].float() @ _rot_180y
+        wxyz    = _rot3x3_to_wxyz(R_world)
+        pos     = tuple(float(v) for v in world_tform4x4_cam[:3, 3].float().cpu())
+    else:
+        wxyz = (0.0, 0.0, 1.0, 0.0)  # 180° around Y: local +Z → world −Z
+        pos  = (0.0, 0.0, 0.0)
 
     handles = []
     try:
@@ -74,8 +77,8 @@ def _add_frustum_to_scene(
             fov=fov,
             aspect=W / H,
             scale=scale,
-            wxyz=(0.0, 0.0, 1.0, 0.0),  # 180° around Y: local +Z → world −Z
-            position=(0.0, 0.0, 0.0),
+            wxyz=wxyz,
+            position=pos,
             color=color,
         )
         handles.append(h)
@@ -90,8 +93,15 @@ def _add_rgb_image_to_scene(
     cam_intr4x4: torch.Tensor,  # (4, 4)
     depth: Optional[torch.Tensor],  # (H, W) or None
     name: str = "/frame/rgb",
+    world_tform4x4_cam: "Optional[torch.Tensor]" = None,
 ) -> Optional[object]:
-    """Add the RGB image as a flat panel in camera space at median scene depth."""
+    """Add the RGB image as a flat panel at median scene depth.
+
+    If world_tform4x4_cam is None the panel is placed in camera space (cam-centric).
+    Otherwise the panel centre and orientation are mapped into world/object space.
+    """
+    from o3b.cv.geometry.transform import depth2pts3d_grid
+
     H_img, W_img = rgb.shape[1], rgb.shape[2]
     fx = cam_intr4x4[0, 0].item()
     fy = cam_intr4x4[1, 1].item()
@@ -99,17 +109,34 @@ def _add_rgb_image_to_scene(
     cy = cam_intr4x4[1, 2].item()
 
     if depth is not None:
-        d_vals = depth[depth > 0]
-        d_place = float(d_vals.median()) if d_vals.numel() > 0 else 1.0
+        pts3d = depth2pts3d_grid(depth.float()[None, None], cam_intr4x4[None].float(), opengl=True)[0]  # 3×H×W
+        valid = depth > 0
+        d_place = float(-pts3d[2][valid].median()) if valid.any() else 1.0
+        # panel centre: back-project image-centre pixel at d_place
+        Hh, Wh = H_img // 2, W_img // 2
+        d_ctr = float(depth[Hh, Wh])
+        if d_ctr > 0:
+            cx_cam = float(pts3d[0, Hh, Wh]) / d_ctr * d_place
+            cy_cam = float(pts3d[1, Hh, Wh]) / d_ctr * d_place
+        else:
+            cx_cam =  (Wh - cx) / fx * d_place
+            cy_cam = -(Hh - cy) / fy * d_place
     else:
         d_place = 1.0
+        cx_cam =  (W_img / 2.0 - cx) / fx * d_place
+        cy_cam = -(H_img / 2.0 - cy) / fy * d_place
 
     render_w = W_img * d_place / fx
     render_h = H_img * d_place / fy
 
-    # image-plane centre in camera space (principal-point offset, Y flipped: image↓ → cam↑)
-    cx_cam =  (W_img / 2.0 - cx) / fx * d_place
-    cy_cam = -(H_img / 2.0 - cy) / fy * d_place
+    if world_tform4x4_cam is not None:
+        W = world_tform4x4_cam.float()
+        cam_pt  = torch.tensor([cx_cam, cy_cam, -d_place, 1.0])
+        pos     = tuple(float(v) for v in (W @ cam_pt)[:3].cpu())
+        wxyz    = _rot3x3_to_wxyz(W[:3, :3])
+    else:
+        pos  = (float(cx_cam), float(cy_cam), float(-d_place))
+        wxyz = (1.0, 0.0, 0.0, 0.0)
 
     # flip image vertically so pixel rows go bottom→top in 3D (matching camera Y↑)
     img_np = (rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")[::-1].copy()
@@ -119,8 +146,8 @@ def _add_rgb_image_to_scene(
             image=img_np,
             render_width=float(render_w),
             render_height=float(render_h),
-            wxyz=(1.0, 0.0, 0.0, 0.0),  # identity; panel at −Z is visible from +Z (camera origin)
-            position=(float(cx_cam), float(cy_cam), float(-d_place)),
+            wxyz=wxyz,
+            position=pos,
         )
         return h
     except Exception:
@@ -200,6 +227,35 @@ def _add_axes_to_scene(
     return result
 
 
+def _fo_to_obj_centric(fo) -> "tuple":
+    """Return (fo_obj_centric, world_tform4x4_cam) for object-centric visualization.
+
+    Applies a pure translation so the object centre lands at the world origin.
+    Camera-space orientation and metric scale are preserved (no rotation, no NCDS
+    normalisation scale):
+      - world_tform4x4_cam  = [I | -t_obj]  (pure translation by -object_centre_in_cam)
+      - fo_obj.cam_tform4x4_obj_ncds = world_tform4x4_cam @ original (mesh correct in world)
+
+    Pass world_tform4x4_cam to the _add_*_to_scene helpers.
+    Returns (fo, None) unchanged when cam_tform4x4_obj_ncds is not available.
+    """
+    from dataclasses import replace as _dc_replace
+
+    if fo.cam_tform4x4_obj_ncds is None:
+        return fo, None
+
+    # Object centre in camera space is the translation column of cam_tform4x4_obj_ncds
+    t_obj = fo.cam_tform4x4_obj_ncds[:3, 3].float()
+
+    world_tform4x4_cam = torch.eye(4)
+    world_tform4x4_cam[:3, 3] = -t_obj
+
+    world_tform4x4_obj_ncds = world_tform4x4_cam @ fo.cam_tform4x4_obj_ncds.float()
+
+    fo_obj = _dc_replace(fo, cam_tform4x4_obj_ncds=world_tform4x4_obj_ncds)
+    return fo_obj, world_tform4x4_cam
+
+
 def _add_depth_pc_to_scene(
     server,
     depth: torch.Tensor,
@@ -207,13 +263,23 @@ def _add_depth_pc_to_scene(
     cam_intr4x4: torch.Tensor,
     name: str = "/frame/depth_pc",
     subsample: int = 4,
+    world_tform4x4_cam: "Optional[torch.Tensor]" = None,
 ) -> Optional[object]:
-    """Back-project depth to camera space and add as a coloured point cloud."""
+    """Back-project depth to camera space and add as a coloured point cloud.
+
+    If world_tform4x4_cam is given the points are further transformed into
+    world/object space before being sent to viser.
+    """
     import numpy as np
 
     pts = _depth_to_pts3d_cam(depth, cam_intr4x4, subsample=subsample)
     if pts.shape[0] == 0:
         return None
+    
+    if world_tform4x4_cam is not None:
+        W    = world_tform4x4_cam.float()
+        pts_h = torch.cat([pts, torch.ones(pts.shape[0], 1)], dim=-1)  # (N, 4)
+        pts   = (W @ pts_h.T).T[:, :3]
 
     pts_np = pts.cpu().numpy()
 
@@ -242,16 +308,12 @@ def _add_depth_pc_to_scene(
         return None
 
 
-def _visualize_frame_objects_viser(dataset, debug: bool = False) -> None:
+def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bool = False) -> None:
     """Interactive viser browser for HouseCorr3D frame-object items.
 
-    The scene is in camera space (camera at origin, +Z forward).
-    Each frame shows:
-      • object mesh transformed to camera space via cam_tform4x4_obj_ncds
-        (NCDS → cam; incorporates both rotation and per-object metric scale)
-      • camera frustum at the origin
-      • RGB image panel at median depth
-      • depth point cloud coloured by RGB
+    obj_centric=False (default): camera-centric — camera at origin, object transformed.
+    obj_centric=True:            object-centric — object mesh at origin, camera placed
+                                 at inv(cam_tform4x4_obj_ncds) in NCDS/world space.
     """
     import time
 
@@ -278,38 +340,52 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False) -> None:
 
     def _load(i: int) -> None:
         _clear()
-        # Load with all modalities (dataset cfg already has modalities=None for viz)
         fo = dataset._load_frame_object(i)
 
         H_img = fo.rgb.shape[1] if fo.rgb is not None else 480
         W_img = fo.rgb.shape[2] if fo.rgb is not None else 640
 
-        # Camera coordinate axes at origin (X=red, Y=green, Z=blue)
-        handles.extend(_add_axes_to_scene(server, "/camera/axes", torch.eye(4),
+        # Object-centric: invert the cam←obj transform so the mesh stays at the origin
+        # and the camera is placed in object/NCDS space.
+        world_tform4x4_cam = None
+        if obj_centric:
+            fo, world_tform4x4_cam = _fo_to_obj_centric(fo)
+
+        # Camera coordinate axes
+        cam_pose = world_tform4x4_cam if world_tform4x4_cam is not None else torch.eye(4)
+        handles.extend(_add_axes_to_scene(server, "/camera/axes", cam_pose,
                                           axes_length=0.15, axes_radius=0.006))
 
-        # Mesh in camera space: fo.mesh is in NCDS; cam_tform4x4_obj_ncds maps NCDS→cam
+        # Mesh: in obj-centric mode fo.cam_tform4x4_obj_ncds == identity → mesh at origin
         if fo.mesh is not None and fo.cam_tform4x4_obj_ncds is not None:
-            fo_cam = fo.transform(fo.cam_tform4x4_obj_ncds)
-            hs = fo_cam._build_scene_handles(server, "/object", (0.0, 0.0, 0.0))
+            fo_world = fo.transform(fo.cam_tform4x4_obj_ncds)
+            hs = fo_world._build_scene_handles(server, "/object", (0.0, 0.0, 0.0))
             handles.extend(h for h in hs.values() if h is not None)
 
-        # Object coordinate axes: position = object center in cam space, orientation = R_obj
+        # Object coordinate axes
         if fo.cam_tform4x4_obj_ncds is not None:
             ax_len = max(0.05, float(fo.obj_size or 0.2) * 0.75)
             handles.extend(_add_axes_to_scene(server, "/object/axes", fo.cam_tform4x4_obj_ncds,
                                               axes_length=ax_len, axes_radius=ax_len * 0.04))
 
         if fo.cam_intr4x4 is not None:
-            handles.extend(_add_frustum_to_scene(server, fo.cam_intr4x4, H=H_img, W=W_img))
-
+            handles.extend(_add_frustum_to_scene(
+                server, fo.cam_intr4x4, H=H_img, W=W_img,
+                world_tform4x4_cam=world_tform4x4_cam,
+            ))
             if fo.rgb is not None:
-                h = _add_rgb_image_to_scene(server, fo.rgb, fo.cam_intr4x4, depth=fo.depth)
+                h = _add_rgb_image_to_scene(
+                    server, fo.rgb, fo.cam_intr4x4, depth=fo.depth,
+                    world_tform4x4_cam=world_tform4x4_cam,
+                )
                 if h is not None:
                     handles.append(h)
 
             if fo.depth is not None:
-                h = _add_depth_pc_to_scene(server, fo.depth, fo.rgb, fo.cam_intr4x4)
+                h = _add_depth_pc_to_scene(
+                    server, fo.depth, fo.rgb, fo.cam_intr4x4,
+                    world_tform4x4_cam=world_tform4x4_cam,
+                )
                 if h is not None:
                     handles.append(h)
 

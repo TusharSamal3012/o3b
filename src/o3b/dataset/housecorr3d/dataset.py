@@ -220,9 +220,11 @@ class HouseCorr3D(ConfigurableDataset):
             category                = category,
             category_id             = category_id,
         )
+        
         if self.cfg.obj_tform4x4 is not None:
             import torch as _torch
             obj = obj.transform(_torch.tensor(self.cfg.obj_tform4x4, dtype=_torch.float32))
+        
         return obj
 
     def _load_object_pair(self, idx: int) -> ObjectPair:
@@ -589,11 +591,12 @@ class HouseCorr3D(ConfigurableDataset):
         render_frames: int = 0,
         renderer: str = "pyrender",
         debug: bool = False,
+        obj_centric: bool = False,
         **_,
     ) -> None:
         if cfg.item_type == ItemType.FRAME_OBJECT:
             cls._visualize_frame_objects(cfg, db=db, limit=limit, object_id=object_id,
-                                          render=render, debug=debug)
+                                          render=render, debug=debug, obj_centric=obj_centric)
             return
 
         path_preprocess = cls._path_preprocess(cfg)
@@ -661,6 +664,7 @@ class HouseCorr3D(ConfigurableDataset):
         object_id: Optional[str] = None,
         render: bool = False,
         debug: bool = False,
+        obj_centric: bool = False,
     ) -> None:
         from o3b.dataset.housecorr3d.frame_dataset import _visualize_frame_objects_viser
         from dataclasses import replace as _r
@@ -702,7 +706,7 @@ class HouseCorr3D(ConfigurableDataset):
                 fo.viz(show=True)
             return
 
-        _visualize_frame_objects_viser(dataset, debug=debug)
+        _visualize_frame_objects_viser(dataset, debug=debug, obj_centric=obj_centric)
 
     # ── item loading ──────────────────────────────────────────────────────────
 
@@ -739,13 +743,15 @@ class HouseCorr3D(ConfigurableDataset):
         # Always load — needed for cam_tform4x4_obj_ncds even when not directly requested.
         cam_tform4x4_obj_raw = (torch.tensor(json.loads(row["cam_tform4x4_obj"]), dtype=torch.float32)
                                 if row.get("cam_tform4x4_obj") else None)
+        
         #if cam_tform4x4_obj_raw is not None and self.cfg.obj_tform4x4 is not None:
         #    T_inv = torch.linalg.inv(torch.tensor(self.cfg.obj_tform4x4, dtype=torch.float32))
         #    cam_tform4x4_obj_raw = cam_tform4x4_obj_raw @ T_inv
+        
         if cam_tform4x4_obj_raw is not None and self.cfg.cam_tform4x4_cam_raw is not None:
             C = torch.tensor(self.cfg.cam_tform4x4_cam_raw, dtype=torch.float32)
             cam_tform4x4_obj_raw = C @ cam_tform4x4_obj_raw
-
+        
         cam_bbox2d = None
         if _want("cam_bbox2d", mods) and mask is not None:
             from o3b.cv.visual.draw import get_bboxs_from_masks
