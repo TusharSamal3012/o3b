@@ -323,12 +323,17 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
         print("Install viser: pip install viser")
         return
 
+    import numpy as np
+
     server = viser.ViserServer()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
 
     n = len(dataset._frame_rows_id)
     idx     = [0]
     handles: list = []
+    _img_handle = [None]   # GuiImageHandle for the sidebar modality view
+    _mod_dd     = [None]   # GuiDropdown handle
+    _mod_imgs   = [{}]     # current dict[str, uint8 HxWx3]
 
     def _clear() -> None:
         for h in handles:
@@ -337,6 +342,36 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
             except Exception:
                 pass
         handles.clear()
+
+    def _build_sidebar_imgs(fo) -> "dict":
+        imgs = {}
+        if fo.rgb is not None:
+            imgs["rgb"] = (
+                fo.rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255
+            ).astype(np.uint8)
+        if fo.depth is not None:
+            d = fo.depth.cpu().numpy()
+            valid = d > 0
+            d_vis = np.zeros_like(d)
+            if valid.any():
+                d_vis[valid] = d[valid] / d[valid].max()
+            imgs["depth"] = (np.stack([d_vis] * 3, axis=-1) * 255).astype(np.uint8)
+        if fo.fo_mask is not None:
+            m = fo.fo_mask
+            if m.dim() == 3:
+                m = m[0]
+            imgs["mask"] = (
+                np.stack([m.float().cpu().numpy()] * 3, axis=-1) * 255
+            ).astype(np.uint8)
+        return imgs
+
+    def _update_sidebar_img() -> None:
+        if _mod_dd[0] is None or _img_handle[0] is None:
+            return
+        mod = _mod_dd[0].value
+        imgs = _mod_imgs[0]
+        if mod in imgs:
+            _img_handle[0].image = imgs[mod]
 
     def _load(i: int) -> None:
         _clear()
@@ -388,6 +423,30 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
                 )
                 if h is not None:
                     handles.append(h)
+
+        # ── sidebar modality images ───────────────────────────────────────────
+        imgs = _build_sidebar_imgs(fo)
+        _mod_imgs[0] = imgs
+        if imgs:
+            keys = list(imgs.keys())
+            if _mod_dd[0] is None:
+                _mod_dd[0] = server.gui.add_dropdown(
+                    "Modality", options=keys, initial_value=keys[0]
+                )
+
+                @_mod_dd[0].on_update
+                def _(_e):
+                    _update_sidebar_img()
+            else:
+                _mod_dd[0].options = keys
+                if _mod_dd[0].value not in keys:
+                    _mod_dd[0].value = keys[0]
+
+            mod = _mod_dd[0].value if _mod_dd[0].value in imgs else keys[0]
+            if _img_handle[0] is None:
+                _img_handle[0] = server.gui.add_image(imgs[mod], label="Frame")
+            else:
+                _img_handle[0].image = imgs[mod]
 
         row = dataset._frame_rows[dataset._frame_rows_id[i]]
         cat = row.get("category", "")

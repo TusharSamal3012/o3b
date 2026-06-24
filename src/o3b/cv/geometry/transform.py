@@ -713,12 +713,12 @@ def get_cam_tform4x4_obj_for_viewpoints_count(
 
         elif viewpoints_count == 3:
             # front, top, right
-            azim = torch.Tensor([0.0, 0.0, math.pi / 2.0])
+            azim = torch.Tensor([0.0, 0.0, -math.pi / 2.0])
             elev = torch.Tensor([0.0, math.pi / 2.0 - 0.01, 0.0])
             theta = torch.Tensor([0.0, 0.0, 0.0])
         elif viewpoints_count == 4:
             # front, top, right, bottom
-            azim = torch.Tensor([0.0, 0.0, math.pi / 2.0, 0.0])
+            azim = torch.Tensor([0.0, 0.0, -math.pi / 2.0, 0.0])
             elev = torch.Tensor([0.0, math.pi / 2.0 - 0.01, 0.0, -math.pi / 2.0 + 0.01])
             theta = torch.Tensor([0.0, 0.0, 0.0, 0.0])
         else:

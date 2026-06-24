@@ -693,19 +693,6 @@ class HouseCorr3D(ConfigurableDataset):
 
         print(f"Showing {len(dataset._frame_rows_id)} / {total} frames  {db_path}\n")
 
-        if render:
-            for seq_idx in range(len(dataset._frame_rows_id)):
-                row = dataset._frame_rows[dataset._frame_rows_id[seq_idx]]
-                print(
-                    f"[{seq_idx + 1}/{len(dataset._frame_rows_id)}]"
-                    f"  {row['frame_id']:<60}"
-                    f"  cat={row.get('category', '?'):<20}"
-                    f"  split={row['split']}  {row['data_type']}"
-                )
-                fo = dataset._load_frame_object(seq_idx)
-                fo.viz(show=True)
-            return
-
         _visualize_frame_objects_viser(dataset, debug=debug, obj_centric=obj_centric)
 
     # ── item loading ──────────────────────────────────────────────────────────

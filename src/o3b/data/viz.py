@@ -159,147 +159,38 @@ def visualize_dataset(
     renderer: str = "pyrender",
     debug: bool = False,
 ) -> None:
-    """Browse a dataset interactively with Prev / Next navigation.
+    """Browse a dataset interactively with Prev / Next navigation via viser.
 
-    render=False (default): passes the viser server to item.viz(server=server)
-    so items add their 3D content (mesh, point cloud, keypoints) directly.
-    render=True: renders render_frames viewpoints with the chosen renderer and
-    displays the result via show_imgs (no viser required).
+    render=False: passes the viser server to item.viz(server=server) so items
+    add their 3D content (mesh, point cloud, keypoints) directly.
+    render=True: additionally renders render_frames viewpoints with the chosen
+    renderer and displays the image strips in the viser GUI sidebar with a
+    modality dropdown (rgb / depth / normals / rgb_kpts).
     """
-    if render:
-        import torch
-        import tkinter as _tk
-        import matplotlib.pyplot as plt
-        from matplotlib.widgets import RadioButtons
-
-        _root = _tk.Tk(); _root.withdraw()
-        _disp_h = _root.winfo_screenheight() // 2
-        _disp_w = _root.winfo_screenwidth()  // 2
-        _root.destroy()
-
-        n = len(dataset)
-        for i in range(n):
-            item = dataset[i]
-            item_id = getattr(
-                item, "object_id",
-                getattr(item, "frame_id",
-                        getattr(item, "scene_id", str(i))),
-            )
-            category = getattr(item, "category", None)
-            cat_str  = f"  cat={category}" if category is not None else ""
-            print(f"  [{i + 1}/{n}] {item_id}{cat_str}")
-            mesh = getattr(item, "mesh", None)
-            if mesh is None:
-                continue
-            batch_vp = _get_render_viewpoints(render_frames, mesh=mesh)
-            
-            from o3b.cv.visual.show import get_default_camera_intrinsics_from_img_size
-            H, W = 512, 512
-            _intr  = get_default_camera_intrinsics_from_img_size(H=H, W=W)
-            batch_vp.cam_intr4x4 = _intr.unsqueeze(0).expand(batch_vp.cam_tform4x4_obj.shape[0], -1, -1)
-            modalities = render_mesh_from_viewpoints(batch_vp, renderer=renderer, H=H, W=W)
-            
-            if modalities is None:
-                continue
-
-            # ── overlay projected keypoints ───────────────────────────────────
-            kpts3d   = getattr(item, "obj_kpts3d",      None)  # (K, 3) | None
-            kpts_mask = getattr(item, "obj_kpts3d_mask", None)  # (K,) bool | None
-            if kpts3d is not None and "rgb" in modalities:
-                from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
-
-                _H, _W = modalities["rgb"].shape[-2], modalities["rgb"].shape[-1]
-                _cam_t = batch_vp.cam_tform4x4_obj.float()        # (N, 4, 4)
-                _N     = _cam_t.shape[0]
-                _intr  = _intr.unsqueeze(0).expand(_N, -1, -1).float()  # (N, 4, 4)
-
-                _kpts = kpts3d.float() if isinstance(kpts3d, torch.Tensor) else torch.tensor(kpts3d, dtype=torch.float32)
-                _K = _kpts.shape[0]
-
-                # (N, K, 2) pixel coords
-                _kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
-                    pts3d=_kpts.unsqueeze(0),
-                    tform4x4=_cam_t.unsqueeze(1),
-                    intr4x4=_intr.unsqueeze(1),
-                )
-
-                print(_kpts2d.shape)
-                print(_kpts2d)
-                modalities["rgb"] = _draw_kpts2d_on_imgs(
-                    modalities["rgb"], _kpts2d,
-                    mask=kpts_mask,
-                    radius=max(_H, _W) // 50,
-                )
-                
-                print(_kpts2d.shape)
-                # z in camera space for front-face check
-                #_kpts_h = torch.cat([_kpts, torch.ones(_K, 1)], dim=1)  # (K, 4)
-                #_z = torch.einsum("nj,kj->nk", _cam_t[:, 2, :], _kpts_h)  # (N, K)
-
-                _valid = (
-                    (_kpts2d[..., 0] >= 0) & (_kpts2d[..., 0] < _W)
-                    & (_kpts2d[..., 1] >= 0) & (_kpts2d[..., 1] < _H)
-                )
-                if kpts_mask is not None:
-                    _m = kpts_mask if isinstance(kpts_mask, torch.Tensor) else torch.tensor(kpts_mask)
-                    _valid = _valid & _m.bool().unsqueeze(0)
-
-                _r = 4
-                _rgb_kpts = modalities["rgb"].clone()
-                for _n in range(_N):
-                    for _k in range(_K):
-                        if not _valid[_n, _k]:
-                            continue
-                        _x = int(_kpts2d[_n, _k, 0].round().item())
-                        _y = int(_kpts2d[_n, _k, 1].round().item())
-                        _c = torch.tensor([
-                            (_k * 37  % 256) / 255.0,
-                            (_k * 97  % 256) / 255.0,
-                            (_k * 153 % 256) / 255.0,
-                        ])
-                        _y0, _y1 = max(0, _y - _r), min(_H, _y + _r + 1)
-                        _x0, _x1 = max(0, _x - _r), min(_W, _x + _r + 1)
-                        _rgb_kpts[_n, :, _y0:_y1, _x0:_x1] = _c[:, None, None]
-                modalities = {**modalities, "rgb_kpts": _rgb_kpts}
-
-            keys = list(modalities.keys())
-
-            def _to_strip(imgs):
-                return torch.cat(list(imgs.clamp(0, 1)), dim=2).permute(1, 2, 0).cpu().numpy()
-
-            fig, ax = plt.subplots(figsize=(_disp_w / 100, _disp_h / 100))
-            fig.suptitle(f"{item_id}{cat_str}", fontsize=9)
-            plt.subplots_adjust(left=0.15, top=0.93)
-            ax.axis("off")
-            img_display = ax.imshow(_to_strip(modalities[keys[0]]))
-
-            radio_ax = fig.add_axes([0.01, 0.4, 0.12, len(keys) * 0.07])
-            radio = RadioButtons(radio_ax, keys, active=0)
-
-            def _on_select(label, _disp=img_display, _mod=modalities, _fig=fig):
-                _disp.set_data(_to_strip(_mod[label]))
-                _disp.autoscale()
-                _fig.canvas.draw_idle()
-
-            radio.on_clicked(_on_select)
-            plt.show()
-        return
-
-    # ── viser path ────────────────────────────────────────────────────────────
     try:
         import viser
     except ImportError:
         print("Install viser: pip install viser")
         return
 
+    import numpy as np
+    import torch
+
     server = viser.ViserServer()
     server.scene.add_light_ambient("/ambient", intensity=3.0)
     _add_canonical_axes(server)
     if debug:
         _add_debug_cameras(server)
+
     n = len(dataset)
-    idx = [0]
-    handles: list = []
+    idx       = [0]
+    handles:  list = []
+    # render mode: cache per item index
+    # entry: {"strips": {name: uint8 HxNWx3}, "modalities": {name: (N,C,H,W)},
+    #         "cam_tform4x4_obj": (N,4,4), "cam_intr4x4": (4,4), "H": int, "W": int}
+    _render_cache: dict = {}
+    _img_handle = [None]      # GuiImageHandle or None
+    _mod_dd     = [None]      # GuiDropdown handle or None
 
     def _clear() -> None:
         for h in handles:
@@ -309,6 +200,89 @@ def visualize_dataset(
                 pass
         handles.clear()
 
+    def _compute_render(i: int) -> "dict | None":
+        if i in _render_cache:
+            return _render_cache[i]
+        item = dataset[i]
+        mesh = getattr(item, "mesh", None)
+        if mesh is None:
+            _render_cache[i] = None
+            return None
+        batch_vp = _get_render_viewpoints(render_frames, mesh=mesh)
+        from o3b.cv.visual.show import get_default_camera_intrinsics_from_img_size
+        H, W = 512, 512
+        _intr = get_default_camera_intrinsics_from_img_size(H=H, W=W)
+        batch_vp.cam_intr4x4 = _intr.unsqueeze(0).expand(
+            batch_vp.cam_tform4x4_obj.shape[0], -1, -1
+        )
+        modalities = render_mesh_from_viewpoints(batch_vp, renderer=renderer, H=H, W=W)
+        if modalities is None:
+            _render_cache[i] = None
+            return None
+
+        # keypoint overlay on rgb
+        kpts3d    = getattr(item, "obj_kpts3d",      None)
+        kpts_mask = getattr(item, "obj_kpts3d_mask", None)
+        if kpts3d is not None and "rgb" in modalities:
+            from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+            _H, _W = modalities["rgb"].shape[-2], modalities["rgb"].shape[-1]
+            _cam_t = batch_vp.cam_tform4x4_obj.float()
+            _N     = _cam_t.shape[0]
+            _intr_n = _intr.unsqueeze(0).expand(_N, -1, -1).float()
+            _kpts = (kpts3d.float() if isinstance(kpts3d, torch.Tensor)
+                     else torch.tensor(kpts3d, dtype=torch.float32))
+            _K = _kpts.shape[0]
+            _kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
+                pts3d=_kpts.unsqueeze(0),
+                tform4x4=_cam_t.unsqueeze(1),
+                intr4x4=_intr_n.unsqueeze(1),
+            )
+            modalities["rgb"] = _draw_kpts2d_on_imgs(
+                modalities["rgb"], _kpts2d, mask=kpts_mask,
+                radius=max(_H, _W) // 50,
+            )
+            _valid = (
+                (_kpts2d[..., 0] >= 0) & (_kpts2d[..., 0] < _W)
+                & (_kpts2d[..., 1] >= 0) & (_kpts2d[..., 1] < _H)
+            )
+            if kpts_mask is not None:
+                _m = (kpts_mask if isinstance(kpts_mask, torch.Tensor)
+                      else torch.tensor(kpts_mask))
+                _valid = _valid & _m.bool().unsqueeze(0)
+            _r = 4
+            _rgb_kpts = modalities["rgb"].clone()
+            for _n in range(_N):
+                for _k in range(_K):
+                    if not _valid[_n, _k]:
+                        continue
+                    _x = int(_kpts2d[_n, _k, 0].round().item())
+                    _y = int(_kpts2d[_n, _k, 1].round().item())
+                    _c = torch.tensor([
+                        (_k * 37  % 256) / 255.0,
+                        (_k * 97  % 256) / 255.0,
+                        (_k * 153 % 256) / 255.0,
+                    ])
+                    _y0, _y1 = max(0, _y - _r), min(_H, _y + _r + 1)
+                    _x0, _x1 = max(0, _x - _r), min(_W, _x + _r + 1)
+                    _rgb_kpts[_n, :, _y0:_y1, _x0:_x1] = _c[:, None, None]
+            modalities["rgb_kpts"] = _rgb_kpts
+
+        # convert to uint8 horizontal strips for the GUI sidebar
+        strips = {}
+        for k, v in modalities.items():
+            arr = torch.cat(list(v.clamp(0, 1)), dim=2).permute(1, 2, 0).cpu().numpy()
+            strips[k] = (arr * 255).astype(np.uint8)
+
+        entry = {
+            "strips":           strips,
+            "modalities":       modalities,
+            "cam_tform4x4_obj": batch_vp.cam_tform4x4_obj,
+            "cam_intr4x4":      _intr,
+            "H": H, "W": W,
+        }
+        _render_cache[i] = entry
+        return entry
+
     def _load(i: int) -> None:
         _clear()
         item = dataset[i]
@@ -317,13 +291,81 @@ def visualize_dataset(
             getattr(item, "frame_id",
                     getattr(item, "scene_id", str(i))),
         )
+        category = getattr(item, "category", None)
+        cat_str  = f"  cat={category}" if category is not None else ""
+
         result = item.viz(server=server)
         if isinstance(result, list):
             handles.extend(result)
-        category = getattr(item, "category", None)
-        cat_str  = f"  cat={category}" if category is not None else ""
+
+        if render:
+            rdata = _compute_render(i)
+            if rdata is not None:
+                strips      = rdata["strips"]
+                modalities  = rdata["modalities"]
+                cam_tforms  = rdata["cam_tform4x4_obj"]   # (N, 4, 4)
+                cam_intr4x4 = rdata["cam_intr4x4"]        # (4, 4)
+                H_r, W_r    = rdata["H"], rdata["W"]
+
+                keys = list(strips.keys())
+                # update or create the modality dropdown
+                if _mod_dd[0] is None:
+                    _mod_dd[0] = server.gui.add_dropdown(
+                        "Modality", options=keys, initial_value=keys[0]
+                    )
+
+                    @_mod_dd[0].on_update
+                    def _(_e):
+                        _update_render_img()
+                else:
+                    _mod_dd[0].options = keys
+                    if _mod_dd[0].value not in keys:
+                        _mod_dd[0].value = keys[0]
+
+                # update or create the GUI image strip
+                mod = _mod_dd[0].value if _mod_dd[0].value in strips else keys[0]
+                if _img_handle[0] is None:
+                    _img_handle[0] = server.gui.add_image(strips[mod], label="Rendered views")
+                else:
+                    _img_handle[0].image = strips[mod]
+
+                # add a camera frustum + rendered RGB panel per viewpoint
+                from o3b.dataset.housecorr3d.frame_dataset import (
+                    _add_frustum_to_scene, _add_rgb_image_to_scene,
+                )
+                N_views = cam_tforms.shape[0]
+                for vi in range(N_views):
+                    world_tform4x4_cam = torch.linalg.inv(cam_tforms[vi].float())
+                    hs = _add_frustum_to_scene(
+                        server, cam_intr4x4, H_r, W_r,
+                        name=f"/render/cam{vi}/frustum",
+                        world_tform4x4_cam=world_tform4x4_cam,
+                    )
+                    handles.extend(hs)
+                    rgb_vi   = modalities["rgb"][vi]              # (3, H, W)
+                    depth_vi = (modalities["depth"][vi, 0]
+                                if "depth" in modalities else None)  # (H, W) or None
+                    h = _add_rgb_image_to_scene(
+                        server, rgb_vi, cam_intr4x4, depth_vi,
+                        name=f"/render/cam{vi}/rgb",
+                        world_tform4x4_cam=world_tform4x4_cam,
+                    )
+                    if h is not None:
+                        handles.append(h)
+
         label.value = f"[{i + 1}/{n}]  {item_id}{cat_str}"
         print(f"  [{i + 1}/{n}] {item_id}{cat_str}")
+
+    def _update_render_img() -> None:
+        if _mod_dd[0] is None or _img_handle[0] is None:
+            return
+        rdata = _render_cache.get(idx[0])
+        if rdata is None:
+            return
+        mod = _mod_dd[0].value
+        strips = rdata["strips"]
+        if mod in strips:
+            _img_handle[0].image = strips[mod]
 
     with server.gui.add_folder("Navigation"):
         label    = server.gui.add_text("Item",   initial_value="loading…")
@@ -343,6 +385,8 @@ def visualize_dataset(
     _load(0)
     print(f"\nViser running at http://localhost:{server.get_port()}")
     print("Use Prev / Next in the panel to browse. Press Ctrl+C to exit.\n")
+    if render:
+        print("Rendered views appear in the GUI sidebar (Modality dropdown to switch).\n")
 
     try:
         while True:
@@ -388,7 +432,7 @@ def get_front_top_right_viewpoints(dist: float = 5.0, mesh=None) -> "FrameObject
     from o3b.cv.geometry.transform import transf4x4_from_spherical
     from o3b.data.datatypes import FrameObjectBatch
     cam = transf4x4_from_spherical(
-        azim=torch.tensor([0.0,        0.0,                  math.pi / 2.0]),
+        azim=torch.tensor([0.0,        0.0,                  -math.pi / 2.0]),
         elev=torch.tensor([0.0,        math.pi / 2.0 - 0.01, 0.0          ]),
         theta=torch.tensor([0.0,       0.0,                  0.0          ]),
         dist=dist,
@@ -401,14 +445,22 @@ def _get_render_viewpoints(n_views: int, dist: float = 5.0, mesh=None) -> "Frame
 
     1  → get_front_viewpoint
     2  → get_front_top_viewpoints
-    ≥3 → get_front_top_right_viewpoints  (default for o3b dataset viz --render)
+    3  → get_front_top_right_viewpoints
+    >3 → get_cam_tform4x4_obj_for_viewpoints_count
     """
     if n_views == 1:
         return get_front_viewpoint(dist=dist, mesh=mesh)
     elif n_views == 2:
         return get_front_top_viewpoints(dist=dist, mesh=mesh)
-    else:
+    elif n_views == 3:
         return get_front_top_right_viewpoints(dist=dist, mesh=mesh)
+    else:
+        from o3b.cv.geometry.transform import get_cam_tform4x4_obj_for_viewpoints_count
+        from o3b.data.datatypes import FrameObjectBatch
+        cam = get_cam_tform4x4_obj_for_viewpoints_count(
+            viewpoints_count=n_views, dist=dist
+        )
+        return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
 
 
 def sample_uniform_viewpoints(
