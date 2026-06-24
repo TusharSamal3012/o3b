@@ -37,4 +37,9 @@ modalities:
 filter_has_kpts: true
 filter_count_max: 50
 
+transform:
+  class_name: CropCamBBox2D
+  H: 224
+  W: 224
+
 categories:

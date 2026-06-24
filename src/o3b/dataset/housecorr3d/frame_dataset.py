@@ -49,25 +49,31 @@ def _add_frustum_to_scene(
 ) -> list:
     """Add a camera frustum in the viser scene.
 
-    If world_tform4x4_cam is None the frustum is placed at the origin (camera-centric).
-    Otherwise it is placed at the camera's pose in world/object space.
+    Viser frustums follow OpenCV convention (+Z forward, +Y down).  Our scene uses
+    OpenGL (+Y up, -Z forward).  A 180° rotation around X maps between them:
+      +Z (viser/OpenCV) → -Z (our OpenGL forward)  ✓
+      +Y (viser down)   → -Y (our OpenGL up)        ✓
+      +X stays +X                                    ✓
 
-    OpenGL convention: camera looks in −Z; the 180° Y rotation maps viser's local +Z
-    (frustum-opening direction) to −Z.  In world/object mode the same flip is composed
-    with the camera's world rotation.
+    The image corners at unit depth are verified via proj3d2d_tform4x4_intr4x4_broadcast:
+      pixel (u,v) ← 3D (X=(u-cx)/fx, Y=-(v-cy)/fy, Z=-1)
+
+    Viser fov is vertical in radians: fov = 2*atan(H/(2*fy)).
     """
     import math
 
-    fx  = cam_intr4x4[0, 0].item()
-    fov = 2.0 * math.atan(W / (2.0 * fx))
+    fy  = cam_intr4x4[1, 1].item()
+    fov = 2.0 * math.atan(H / (2.0 * fy))
+
+    # 180° around X: wxyz = (0, 1, 0, 0)
+    _rot_180x = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]])
 
     if world_tform4x4_cam is not None:
-        _rot_180y = torch.tensor([[-1., 0., 0.], [0., 1., 0.], [0., 0., -1.]])
-        R_world = world_tform4x4_cam[:3, :3].float() @ _rot_180y
+        R_world = world_tform4x4_cam[:3, :3].float() @ _rot_180x
         wxyz    = _rot3x3_to_wxyz(R_world)
         pos     = tuple(float(v) for v in world_tform4x4_cam[:3, 3].float().cpu())
     else:
-        wxyz = (0.0, 0.0, 1.0, 0.0)  # 180° around Y: local +Z → world −Z
+        wxyz = (0.0, 1.0, 0.0, 0.0)  # 180° around X
         pos  = (0.0, 0.0, 0.0)
 
     handles = []
@@ -346,9 +352,21 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
     def _build_sidebar_imgs(fo) -> "dict":
         imgs = {}
         if fo.rgb is not None:
-            imgs["rgb"] = (
-                fo.rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255
-            ).astype(np.uint8)
+            rgb_np = (fo.rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            imgs["rgb"] = rgb_np
+            if fo.cam_bbox2d is not None:
+                x1, y1, x2, y2 = (int(v) for v in fo.cam_bbox2d.cpu().tolist())
+                bbox_np = rgb_np.copy()
+                H_b, W_b = bbox_np.shape[:2]
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(W_b - 1, x2), min(H_b - 1, y2)
+                t = max(2, H_b // 200)  # line thickness
+                color = (255, 220, 0)
+                bbox_np[y1:y1+t, x1:x2+1] = color   # top
+                bbox_np[y2-t:y2, x1:x2+1] = color   # bottom
+                bbox_np[y1:y2+1, x1:x1+t] = color   # left
+                bbox_np[y1:y2+1, x2-t:x2] = color   # right
+                imgs["cam_bbox2d"] = bbox_np
         if fo.depth is not None:
             d = fo.depth.cpu().numpy()
             valid = d > 0
@@ -363,6 +381,33 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
             imgs["mask"] = (
                 np.stack([m.float().cpu().numpy()] * 3, axis=-1) * 255
             ).astype(np.uint8)
+        _tform_for_kpts = fo.cam_tform4x4_obj_ncds if fo.cam_tform4x4_obj_ncds is not None \
+            else fo.cam_tform4x4_obj
+        if (
+            fo.obj_kpts3d is not None
+            and fo.cam_intr4x4 is not None
+            and _tform_for_kpts is not None
+            and fo.rgb is not None
+        ):
+            try:
+                from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+                from o3b.data.datatypes.object import _draw_kpts2d_on_imgs
+                import torch as _torch
+                H_k, W_k = rgb_np.shape[:2]
+                base_t = _torch.from_numpy(rgb_np).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+                kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
+                    pts3d=fo.obj_kpts3d.float().cpu().unsqueeze(0),
+                    tform4x4=_tform_for_kpts.float().cpu().unsqueeze(0).unsqueeze(0),
+                    intr4x4=fo.cam_intr4x4.float().cpu().unsqueeze(0).unsqueeze(0),
+                )  # (1, K, 2)
+                drawn = _draw_kpts2d_on_imgs(
+                    base_t, kpts2d,
+                    mask=fo.obj_kpts3d_mask.cpu() if fo.obj_kpts3d_mask is not None else None,
+                    radius=max(H_k, W_k) // 50,
+                )
+                imgs["obj_kpts3d"] = (drawn[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            except Exception:
+                pass
         return imgs
 
     def _update_sidebar_img() -> None:
@@ -376,9 +421,15 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
     def _load(i: int) -> None:
         _clear()
         fo = dataset._load_frame_object(i)
+        if dataset._transform is not None:
+            fo = dataset._transform(fo)
 
         H_img = fo.rgb.shape[1] if fo.rgb is not None else 480
         W_img = fo.rgb.shape[2] if fo.rgb is not None else 640
+
+        # Sidebar images use the original camera-space tform for 2-D projection;
+        # build them now before _fo_to_obj_centric replaces cam_tform4x4_obj_ncds.
+        fo_for_sidebar = fo
 
         # Object-centric: invert the cam←obj transform so the mesh stays at the origin
         # and the camera is placed in object/NCDS space.
@@ -425,7 +476,7 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
                     handles.append(h)
 
         # ── sidebar modality images ───────────────────────────────────────────
-        imgs = _build_sidebar_imgs(fo)
+        imgs = _build_sidebar_imgs(fo_for_sidebar)
         _mod_imgs[0] = imgs
         if imgs:
             keys = list(imgs.keys())

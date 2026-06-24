@@ -83,14 +83,16 @@ class FrameObject(Frame, Object):
                 self.cam_tform4x4_obj.cpu(),
             ))
 
+        _tform_kpts = self.cam_tform4x4_obj_ncds if self.cam_tform4x4_obj_ncds is not None \
+            else self.cam_tform4x4_obj
         if (self.obj_kpts3d is not None
                 and self.cam_intr4x4 is not None
-                and self.cam_tform4x4_obj is not None):
+                and _tform_kpts is not None):
             layers["obj_kpts3d"] = ("draw_kpts2d", (
                 self.obj_kpts3d.cpu(),
                 self.obj_kpts3d_mask.cpu() if self.obj_kpts3d_mask is not None else None,
                 self.cam_intr4x4.cpu(),
-                self.cam_tform4x4_obj.cpu(),
+                _tform_kpts.cpu(),
             ))
 
         if not layers:
@@ -145,23 +147,22 @@ class FrameObject(Frame, Object):
                     pass
 
             if "obj_kpts3d" in layers and active.get("obj_kpts3d", True):
-                from o3b.cv.visual.draw import draw_pixels, get_colors
+                from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+                from o3b.data.datatypes.object import _draw_kpts2d_on_imgs
                 try:
-                    kpts3d, kpts_mask, cam_intr4x4, cam_tform4x4_obj = layers["obj_kpts3d"][1]
-                    # drop masked-out keypoints before projection
-                    if kpts_mask is not None:
-                        kpts3d = kpts3d[kpts_mask]
-                    K = kpts3d.shape[0]
-                    if K == 0:
-                        raise ValueError("no valid keypoints")
-                    kpts3d_h = torch.cat([kpts3d, torch.ones(K, 1)], dim=-1)        # (K, 4)
-                    proj4x4  = cam_intr4x4 @ cam_tform4x4_obj                       # (4, 4)
-                    cam_pts  = (proj4x4 @ kpts3d_h.T).T                             # (K, 4)
-                    kpts2d   = cam_pts[:, :2] / cam_pts[:, 2:3].clamp(min=1e-6)     # (K, 2)
-                    colors   = get_colors(K)                                         # (K, 3) HSV rainbow
-                    canvas_t = draw_pixels(
-                        canvas_t, pxls=kpts2d, colors=colors, radius_in=2, radius_out=5,
-                    ).float().div(255.0)
+                    kpts3d, kpts_mask, cam_intr4x4, cam_tform = layers["obj_kpts3d"][1]
+                    H_c, W_c = canvas_t.shape[-2:]
+                    kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
+                        pts3d=kpts3d.unsqueeze(0),
+                        tform4x4=cam_tform.unsqueeze(0).unsqueeze(0),
+                        intr4x4=cam_intr4x4.unsqueeze(0).unsqueeze(0),
+                    )  # (1, K, 2)
+                    canvas_t = _draw_kpts2d_on_imgs(
+                        canvas_t.unsqueeze(0),
+                        kpts2d,
+                        mask=kpts_mask,
+                        radius=max(H_c, W_c) // 50,
+                    )[0]
                 except Exception:
                     pass
 

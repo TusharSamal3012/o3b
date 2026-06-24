@@ -65,6 +65,9 @@ class DatasetConfig:
     # camera-convention transform: left-multiplies cam_tform4x4_obj_raw (e.g. CV→OpenGL flip)
     cam_tform4x4_cam_raw:  Optional[list]    = None   # [[r00,...],[...],[...],[0,0,0,1]]
 
+    # O3B_Transform applied to every loaded item (dict with class_name + kwargs)
+    transform:             Optional[dict]    = None
+
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
 
@@ -91,6 +94,7 @@ class DatasetConfig:
             "filter_score_zero":  self.filter_score_zero,
             "obj_tform4x4":         self.obj_tform4x4,
             "cam_tform4x4_cam_raw": self.cam_tform4x4_cam_raw,
+            "transform":            self.transform,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -118,6 +122,7 @@ class DatasetConfig:
             filter_score_zero = bool(d.get("filter_score_zero", False)),
             obj_tform4x4         = d.get("obj_tform4x4"),
             cam_tform4x4_cam_raw = d.get("cam_tform4x4_cam_raw"),
+            transform            = d.get("transform"),
             extra           = d.get("extra", {}),
         )
 
@@ -167,6 +172,28 @@ def build_dataset(cfg: DatasetConfig) -> "ConfigurableDataset":
     return _REGISTRY_DATASETS[cfg.class_name](cfg)
 
 
+# ── Transform helper ─────────────────────────────────────────────────────────
+
+def _build_transform(transform_cfg: Optional[dict]):
+    """Instantiate an O3B_Transform from a config dict, or return None."""
+    if transform_cfg is None:
+        return None
+    from omegaconf import OmegaConf
+    from o3b.data.transforms.transform import O3B_Transform
+    # import all known transform modules so subclasses register themselves
+    _TRANSFORM_MODULES = [
+        "o3b.data.transforms.frame_object.crop_cam_bbox2d",
+    ]
+    import importlib
+    for mod in _TRANSFORM_MODULES:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            pass
+    cfg = OmegaConf.create(transform_cfg)
+    return O3B_Transform.create_from_config(cfg)
+
+
 # ── Base class ────────────────────────────────────────────────────────────────
 
 class ConfigurableDataset(_TorchDataset):
@@ -180,6 +207,7 @@ class ConfigurableDataset(_TorchDataset):
     def __init__(self, cfg: DatasetConfig):
         self.cfg = cfg
         self._index: list = []
+        self._transform = _build_transform(cfg.transform)
         self._setup()
 
     def _setup(self) -> None:
@@ -206,13 +234,16 @@ class ConfigurableDataset(_TorchDataset):
 
     def __getitem__(self, idx: int):
         if self.cfg.item_type == ItemType.OBJECT:
-            return self._load_object(idx)
+            item = self._load_object(idx)
         elif self.cfg.item_type == ItemType.OBJECT_PAIR:
-            return self._load_object_pair(idx)
+            item = self._load_object_pair(idx)
         elif self.cfg.item_type == ItemType.FRAME_OBJECT:
-            return self._load_frame_object(idx)
+            item = self._load_frame_object(idx)
         else:
-            return self._load_scene_object(idx)
+            item = self._load_scene_object(idx)
+        if self._transform is not None and item is not None:
+            item = self._transform(item)
+        return item
 
     # ── Collation ─────────────────────────────────────────────────────────────
 
