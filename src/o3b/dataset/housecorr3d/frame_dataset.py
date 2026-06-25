@@ -47,45 +47,60 @@ def _add_frustum_to_scene(
     scale: float = 0.3,
     world_tform4x4_cam: "Optional[torch.Tensor]" = None,
 ) -> list:
-    """Add a camera frustum in the viser scene.
+    """Draw camera frustum wireframe by back-projecting the four image corners.
 
-    Viser frustums follow OpenCV convention (+Z forward, +Y down).  Our scene uses
-    OpenGL (+Y up, -Z forward).  A 180° rotation around X maps between them:
-      +Z (viser/OpenCV) → -Z (our OpenGL forward)  ✓
-      +Y (viser down)   → -Y (our OpenGL up)        ✓
-      +X stays +X                                    ✓
+    Back-projection (OpenGL: +Y up, -Z forward):
+      pixel (u, v) → X = (u-cx)/fx, Y = -(v-cy)/fy, Z = -1
 
-    The image corners at unit depth are verified via proj3d2d_tform4x4_intr4x4_broadcast:
-      pixel (u,v) ← 3D (X=(u-cx)/fx, Y=-(v-cy)/fy, Z=-1)
-
-    Viser fov is vertical in radians: fov = 2*atan(H/(2*fy)).
+    This correctly handles off-center principal points (e.g. after a crop
+    transform where cx/cy shift outside the image bounds).
     """
-    import math
+    import numpy as np
 
-    fy  = cam_intr4x4[1, 1].item()
-    fov = 2.0 * math.atan(H / (2.0 * fy))
+    fx = cam_intr4x4[0, 0].item()
+    fy = cam_intr4x4[1, 1].item()
+    cx = cam_intr4x4[0, 2].item()
+    cy = cam_intr4x4[1, 2].item()
 
-    # 180° around X: wxyz = (0, 1, 0, 0)
-    _rot_180x = torch.tensor([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]])
+    d = scale  # frustum depth in camera space
+    # TL, TR, BR, BL corners at depth d (Z = -d in OpenGL)
+    corners = np.array([
+        [-cx / fx * d,         cy / fy * d,          -d],  # TL (u=0, v=0)
+        [(W - cx) / fx * d,    cy / fy * d,          -d],  # TR (u=W, v=0)
+        [(W - cx) / fx * d,   -(H - cy) / fy * d,    -d],  # BR (u=W, v=H)
+        [-cx / fx * d,        -(H - cy) / fy * d,    -d],  # BL (u=0, v=H)
+    ], dtype=np.float32)
 
+    origin = np.zeros(3, dtype=np.float32)
+    edges = np.array([
+        [origin,       corners[0]],  # O → TL
+        [origin,       corners[1]],  # O → TR
+        [origin,       corners[2]],  # O → BR
+        [origin,       corners[3]],  # O → BL
+        [corners[0],   corners[1]],  # TL → TR
+        [corners[1],   corners[2]],  # TR → BR
+        [corners[2],   corners[3]],  # BR → BL
+        [corners[3],   corners[0]],  # BL → TL
+    ], dtype=np.float32)  # (8, 2, 3)
+
+    # Points are in OpenGL camera space; apply world_tform4x4_cam directly.
+    # No 180° convention flip needed (unlike add_camera_frustum which expects OpenCV).
     if world_tform4x4_cam is not None:
-        R_world = world_tform4x4_cam[:3, :3].float() @ _rot_180x
-        wxyz    = _rot3x3_to_wxyz(R_world)
-        pos     = tuple(float(v) for v in world_tform4x4_cam[:3, 3].float().cpu())
+        wxyz = _rot3x3_to_wxyz(world_tform4x4_cam[:3, :3].float())
+        pos  = tuple(float(v) for v in world_tform4x4_cam[:3, 3].float().cpu())
     else:
-        wxyz = (0.0, 1.0, 0.0, 0.0)  # 180° around X
+        wxyz = (1.0, 0.0, 0.0, 0.0)  # identity
         pos  = (0.0, 0.0, 0.0)
 
     handles = []
     try:
-        h = server.scene.add_camera_frustum(
+        h = server.scene.add_line_segments(
             name,
-            fov=fov,
-            aspect=W / H,
-            scale=scale,
+            points=edges,
+            colors=np.array(color, dtype=np.uint8),
+            line_width=1.5,
             wxyz=wxyz,
             position=pos,
-            color=color,
         )
         handles.append(h)
     except Exception:

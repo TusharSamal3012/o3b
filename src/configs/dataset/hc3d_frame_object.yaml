@@ -10,6 +10,7 @@ defaults:
 
 class_name: HouseCorr3D
 
+mesh_type: "mc16"
 
 # mesh_type: "mc16_vuni4_r256_fdinov2s"
 
@@ -36,6 +37,7 @@ modalities:
 
 filter_has_kpts: true
 filter_count_max: 50
+
 
 transform:
   class_name: CropCamBBox2D
