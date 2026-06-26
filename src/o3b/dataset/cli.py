@@ -2,9 +2,12 @@
 o3b dataset CLI.
 
 Usage:
-  od3d_dataset fetch  -d housecorr3d_object_pair [--url URL] [--platform PLATFORM]
-  od3d_dataset index  -d housecorr3d_object_pair [--db index.db] [--platform PLATFORM]
-  od3d_dataset viz    -d housecorr3d_object_pair [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
+  od3d_dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
+  od3d_dataset index  -d hc3d_object        [--db index.db] [--platform PLATFORM]
+  od3d_dataset viz    -d hc3d_object_pair   [--db index.db] [--limit N] [--object-id ID] [--render] [--platform PLATFORM]
+
+Pair datasets (hc3d_object_pair, hc3d_frame_object_pair) need no separate index
+step — pairs are derived at load time from the base index (index.db / frames.db).
 
 -d / --config accepts either a short name (e.g. housecorr3d_object_pair, resolved from
 configs/dataset/) or a full path to a YAML file.  The YAML must contain a 'class_name'

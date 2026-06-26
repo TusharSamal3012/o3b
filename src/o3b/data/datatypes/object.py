@@ -543,6 +543,30 @@ class ObjectPairBatch:
     trgt_obj_kpts3d_mask:         Optional[Tensor] = None  # (B, K)    bool
     trgt_category:                Optional[Tensor] = None  # (B,)      int64
 
+    # ── frame-object pose fields (populated when src/trgt are FrameObjects) ───
+    # Ground-truth poses (from the dataset).
+    src_cam_tform4x4_obj:       Optional[Tensor] = None  # (B, 4, 4)  cam←obj (metric)
+    trgt_cam_tform4x4_obj:      Optional[Tensor] = None  # (B, 4, 4)
+    src_cam_tform4x4_obj_ncds:  Optional[Tensor] = None  # (B, 4, 4)  ncds→cam (metric)
+    trgt_cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (B, 4, 4)
+    src_obj_size:               Optional[Tensor] = None  # (B,)  metric max bbox extent
+    trgt_obj_size:              Optional[Tensor] = None  # (B,)
+    # Predicted poses (filled in by a pose-estimation method; None → use GT).
+    src_pred_cam_tform4x4_obj:  Optional[Tensor] = None  # (B, 4, 4)
+    trgt_pred_cam_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
+    # Frame inputs (for pose-estimation methods); stacked tensors, or lists if
+    # per-sample resolutions differ.
+    src_rgb:          Optional[object] = None  # (B, 3, H, W)
+    trgt_rgb:         Optional[object] = None
+    src_depth:        Optional[object] = None  # (B, H, W)
+    trgt_depth:       Optional[object] = None
+    src_depth_mask:   Optional[object] = None  # (B, H, W) bool
+    trgt_depth_mask:  Optional[object] = None
+    src_fo_mask:      Optional[object] = None  # (B, H, W) bool object instance
+    trgt_fo_mask:     Optional[object] = None
+    src_cam_intr4x4:  Optional[Tensor] = None  # (B, 4, 4)
+    trgt_cam_intr4x4: Optional[Tensor] = None
+
 
 def collate_object_pairs(
     samples: list[ObjectPair],
@@ -553,6 +577,24 @@ def collate_object_pairs(
         if include and f"{side}_{attr}" not in include:
             return None
         return _stack_field(vals)
+
+    def _get_opt(attr, side: str):
+        """Like _get but tolerates objects lacking the attribute (frame-only fields)."""
+        if include and f"{side}_{attr}" not in include:
+            return None
+        return _stack_field([getattr(getattr(s, f"{side}_object"), attr, None) for s in samples])
+
+    def _get_stack_or_list(attr, side: str):
+        """Frame inputs of possibly differing resolution: stack when shapes match,
+        else keep a per-sample list (None if any sample lacks the attribute)."""
+        if include and f"{side}_{attr}" not in include:
+            return None
+        vals = [getattr(getattr(s, f"{side}_object"), attr, None) for s in samples]
+        if any(v is None for v in vals):
+            return None
+        if len({tuple(v.shape) for v in vals}) == 1:
+            return torch.stack(vals, dim=0)
+        return vals
 
     def _get_pad(attr, side: str):
         """Pad-stack variable-length vertex tensors; merge with per-item mask."""
@@ -577,6 +619,16 @@ def collate_object_pairs(
             return None
         return _stack_field([
             torch.tensor(v) if v is not None else None for v in vals
+        ])
+
+    def _scalar(attr: str, side: str):
+        """Stack per-sample python scalars into a (B,) tensor (None if any missing)."""
+        if include and f"{side}_{attr}" not in include:
+            return None
+        return _stack_field([
+            torch.as_tensor(getattr(getattr(s, f"{side}_object"), attr), dtype=torch.float32)
+            if getattr(getattr(s, f"{side}_object"), attr, None) is not None else None
+            for s in samples
         ])
 
     src_verts3d,       src_feats_pad_mask   = _get_pad("verts3d",            "src")
@@ -638,6 +690,22 @@ def collate_object_pairs(
         trgt_obj_kpts3d              = _get("obj_kpts3d",              "trgt"),
         trgt_obj_kpts3d_mask         = _get("obj_kpts3d_mask",         "trgt"),
         trgt_category                = _cat("trgt"),
+        src_cam_tform4x4_obj         = _get_opt("cam_tform4x4_obj",      "src"),
+        trgt_cam_tform4x4_obj        = _get_opt("cam_tform4x4_obj",      "trgt"),
+        src_cam_tform4x4_obj_ncds    = _get_opt("cam_tform4x4_obj_ncds", "src"),
+        trgt_cam_tform4x4_obj_ncds   = _get_opt("cam_tform4x4_obj_ncds", "trgt"),
+        src_obj_size                 = _scalar("obj_size",             "src"),
+        trgt_obj_size                = _scalar("obj_size",             "trgt"),
+        src_rgb                      = _get_stack_or_list("rgb",        "src"),
+        trgt_rgb                     = _get_stack_or_list("rgb",        "trgt"),
+        src_depth                    = _get_stack_or_list("depth",      "src"),
+        trgt_depth                   = _get_stack_or_list("depth",      "trgt"),
+        src_depth_mask               = _get_stack_or_list("depth_mask", "src"),
+        trgt_depth_mask              = _get_stack_or_list("depth_mask", "trgt"),
+        src_fo_mask                  = _get_stack_or_list("fo_mask",    "src"),
+        trgt_fo_mask                 = _get_stack_or_list("fo_mask",    "trgt"),
+        src_cam_intr4x4              = _get_opt("cam_intr4x4",          "src"),
+        trgt_cam_intr4x4             = _get_opt("cam_intr4x4",          "trgt"),
     )
 
 

@@ -11,22 +11,25 @@ from o3b.data.modalities import (
     FrameObject, SceneObject,
     FrameObjectBatch, SceneObjectBatch,
     ObjectPair,
+    collate_frame_objects, collate_scene_objects,
 )
 
 
 # ── Item / batch type enums ───────────────────────────────────────────────────
 
 class ItemType(str, Enum):
-    OBJECT       = "object"
-    OBJECT_PAIR  = "object_pair"
-    FRAME_OBJECT = "frame_object"
-    SCENE_OBJECT = "scene_object"
+    OBJECT            = "object"
+    OBJECT_PAIR       = "object_pair"
+    FRAME_OBJECT      = "frame_object"
+    FRAME_OBJECT_PAIR = "frame_object_pair"
+    SCENE_OBJECT      = "scene_object"
 
 class BatchType(str, Enum):
-    OBJECT       = "object"
-    OBJECT_PAIR  = "object_pair"
-    FRAME_OBJECT = "frame_object"
-    SCENE_OBJECT = "scene_object"
+    OBJECT            = "object"
+    OBJECT_PAIR       = "object_pair"
+    FRAME_OBJECT      = "frame_object"
+    FRAME_OBJECT_PAIR = "frame_object_pair"
+    SCENE_OBJECT      = "scene_object"
 
 
 # ── Dataset config ────────────────────────────────────────────────────────────
@@ -68,6 +71,12 @@ class DatasetConfig:
     # O3B_Transform applied to every loaded item (dict with class_name + kwargs)
     transform:             Optional[dict]    = None
 
+    # HuggingFace sharding: when set, items are materialised once into
+    # path_preprocess/sharded/<sharded_name> and loaded from there on subsequent
+    # runs.  sharded_override=True rebuilds the shards even if they already exist.
+    sharded_name:     Optional[str]         = None
+    sharded_override: bool                  = False
+
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
 
@@ -95,6 +104,8 @@ class DatasetConfig:
             "obj_tform4x4":         self.obj_tform4x4,
             "cam_tform4x4_cam_raw": self.cam_tform4x4_cam_raw,
             "transform":            self.transform,
+            "sharded_name":         self.sharded_name,
+            "sharded_override":     self.sharded_override,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -123,6 +134,8 @@ class DatasetConfig:
             obj_tform4x4         = d.get("obj_tform4x4"),
             cam_tform4x4_cam_raw = d.get("cam_tform4x4_cam_raw"),
             transform            = d.get("transform"),
+            sharded_name         = d.get("sharded_name"),
+            sharded_override     = bool(d.get("sharded_override", False)),
             extra           = d.get("extra", {}),
         )
 
@@ -207,11 +220,86 @@ class ConfigurableDataset(_TorchDataset):
     def __init__(self, cfg: DatasetConfig):
         self.cfg = cfg
         self._index: list = []
+        self._sharded = None       # HuggingFace Dataset when sharding is active
         self._transform = _build_transform(cfg.transform)
         self._setup()
+        if cfg.sharded_name:
+            self._setup_sharded()
 
     def _setup(self) -> None:
         pass
+
+    # ── HuggingFace sharding ──────────────────────────────────────────────────
+
+    _ITEM_TYPE_TO_CLS = {
+        ItemType.OBJECT:       "Object",
+        ItemType.OBJECT_PAIR:  "ObjectPair",
+        ItemType.FRAME_OBJECT: "FrameObject",
+        ItemType.SCENE_OBJECT: "SceneObject",
+    }
+
+    def _item_type_cls(self):
+        from o3b.data.modalities import (  # noqa: F401
+            FrameObject, SceneObject, Object, ObjectPair,
+        )
+        return {
+            ItemType.OBJECT: Object,
+            ItemType.OBJECT_PAIR: ObjectPair,
+            ItemType.FRAME_OBJECT: FrameObject,
+            ItemType.FRAME_OBJECT_PAIR: ObjectPair,
+            ItemType.SCENE_OBJECT: SceneObject,
+        }[self.cfg.item_type]
+
+    def _sharded_dir(self) -> Path:
+        if self.cfg.path_preprocess is None:
+            raise ValueError(
+                "sharded_name is set but path_preprocess is None; "
+                "cannot resolve the sharded dataset location."
+            )
+        return Path(self.cfg.path_preprocess) / "sharded" / self.cfg.sharded_name
+
+    def _setup_sharded(self) -> None:
+        """Load the sharded dataset, building it from raw items if necessary."""
+        from o3b.dataset.sharding import (
+            build_sharded_dataset, item_to_record,
+            read_sharded_dataset, write_sharded_dataset,
+        )
+
+        path = self._sharded_dir()
+        if path.exists() and not self.cfg.sharded_override:
+            print(f"Loading sharded dataset from {path}")
+            self._sharded = read_sharded_dataset(path)
+            return
+
+        from tqdm import tqdm
+
+        action = "Overriding" if path.exists() else "Building"
+        n = len(self)
+        print(f"{action} sharded dataset at {path} ({n} items)…")
+        records: list[dict] = []
+        for i in tqdm(range(n), desc="Sharding", unit="item"):
+            item = self._load_item(i)
+            if item is None:
+                continue
+            records.append(item_to_record(item))
+        hf = build_sharded_dataset(records)
+        write_sharded_dataset(hf, path)
+        self._sharded = read_sharded_dataset(path)
+        print(f"Done. Wrote {len(self._sharded)} items → {path}")
+
+    # ── item loading dispatch ─────────────────────────────────────────────────
+
+    def _load_item(self, idx: int):
+        if self.cfg.item_type == ItemType.OBJECT:
+            return self._load_object(idx)
+        elif self.cfg.item_type == ItemType.OBJECT_PAIR:
+            return self._load_object_pair(idx)
+        elif self.cfg.item_type == ItemType.FRAME_OBJECT:
+            return self._load_frame_object(idx)
+        elif self.cfg.item_type == ItemType.FRAME_OBJECT_PAIR:
+            return self._load_frame_object_pair(idx)
+        else:
+            return self._load_scene_object(idx)
 
     # ── item loading (implement the one(s) matching your item_type) ──────────
 
@@ -224,23 +312,25 @@ class ConfigurableDataset(_TorchDataset):
     def _load_frame_object(self, idx: int) -> FrameObject:
         raise NotImplementedError
 
+    def _load_frame_object_pair(self, idx: int) -> ObjectPair:
+        raise NotImplementedError
+
     def _load_scene_object(self, idx: int) -> SceneObject:
         raise NotImplementedError
 
     # ── Dataset protocol ──────────────────────────────────────────────────────
 
     def __len__(self) -> int:
+        if self._sharded is not None:
+            return len(self._sharded)
         raise NotImplementedError
 
     def __getitem__(self, idx: int):
-        if self.cfg.item_type == ItemType.OBJECT:
-            item = self._load_object(idx)
-        elif self.cfg.item_type == ItemType.OBJECT_PAIR:
-            item = self._load_object_pair(idx)
-        elif self.cfg.item_type == ItemType.FRAME_OBJECT:
-            item = self._load_frame_object(idx)
+        if self._sharded is not None:
+            from o3b.dataset.sharding import record_to_item
+            item = record_to_item(self._sharded[int(idx)], self._item_type_cls())
         else:
-            item = self._load_scene_object(idx)
+            item = self._load_item(idx)
         if self._transform is not None and item is not None:
             item = self._transform(item)
         return item

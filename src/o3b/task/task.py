@@ -13,8 +13,9 @@ from omegaconf import DictConfig, OmegaConf
 _REGISTRY_TASKS: dict[str, type["OD3D_Task"]] = {}
 
 _CLASS_TO_MODULE: dict[str, str] = {
-    "ObjectTask":    "o3b.task.object.task",
-    "Crsp3DNNTask":  "o3b.task.crsp3d_nn.task",
+    "ObjectTask":       "o3b.task.object.task",
+    "Crsp3DNNTask":     "o3b.task.crsp3d_nn.task",
+    "CamCrsp3DNNTask":  "o3b.task.cam_crsp3d_nn.task",
 }
 
 

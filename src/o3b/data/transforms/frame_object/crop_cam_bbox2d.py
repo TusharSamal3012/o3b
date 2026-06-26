@@ -16,15 +16,26 @@ class CropCamBBox2D(O3B_Transform):
         H: output image height in pixels.
         W: output image width in pixels.
         scale_bbox: multiplicative padding around the bbox (default 1.0 = tight).
+        bbox_overlap: extra crop margin on each side as a fraction of the bbox
+            size (default 0.15). 0.15 means the crop extends by 0.15 * bbox_size
+            beyond each edge, so the crop spans (1 + 2 * bbox_overlap) of the bbox.
+            Combined multiplicatively with scale_bbox.
         ensure_squared: force the crop region to be square (default False).
     """
 
-    def __init__(self, H: int, W: int, scale_bbox: float = 1.0, ensure_squared: bool = False):
+    def __init__(self, H: int, W: int, scale_bbox: float = 1.0,
+                 bbox_overlap: float = 0.15, ensure_squared: bool = False):
         super().__init__()
         self.H = H
         self.W = W
         self.scale_bbox = scale_bbox
+        self.bbox_overlap = bbox_overlap
         self.ensure_squared = ensure_squared
+
+    @property
+    def _crop_scale(self) -> float:
+        """Effective bbox scale: multiplicative padding plus per-side overlap."""
+        return self.scale_bbox * (1.0 + 2.0 * self.bbox_overlap)
 
     def __call__(self, fo):
         """
@@ -53,7 +64,7 @@ class CropCamBBox2D(O3B_Transform):
                 H_out=self.H,
                 W_out=self.W,
                 mode="bilinear",
-                scale_bbox=self.scale_bbox,
+                scale_bbox=self._crop_scale,
                 ensure_squared=self.ensure_squared,
             )
             updates["rgb"] = rgb_crop.to(dtype=fo.rgb.dtype)
@@ -66,7 +77,7 @@ class CropCamBBox2D(O3B_Transform):
                 H_out=self.H,
                 W_out=self.W,
                 mode="bilinear",
-                scale_bbox=self.scale_bbox,
+                scale_bbox=self._crop_scale,
                 ensure_squared=self.ensure_squared,
             )
 
@@ -83,7 +94,7 @@ class CropCamBBox2D(O3B_Transform):
                 H_out=self.H,
                 W_out=self.W,
                 mode="nearest_v2",
-                scale_bbox=self.scale_bbox,
+                scale_bbox=self._crop_scale,
                 ensure_squared=self.ensure_squared,
             )
             if squeeze:

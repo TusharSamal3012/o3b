@@ -24,6 +24,7 @@ dependencies = [
     "torch_geometric",
     "gdist",
     "qwen-vl-utils",
+    "datasets",
 ]
 
 [project.scripts]

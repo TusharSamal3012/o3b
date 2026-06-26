@@ -1,0 +1,22 @@
+# Sharded hc3d_frame_object filtered to a single category (toy_boat).
+#
+# Items are materialised once into
+#   <path_preprocess>/sharded/<sharded_name>
+# and loaded from there on subsequent runs. The category name is part of the
+# sharded_name so per-category shards live side by side.
+#
+# o3b dataset viz -d hc3d_frame_object_cat_sharded
+
+defaults:
+  - hc3d_frame_object
+  - _self_
+
+# Single category to filter for; referenced below via ${category} so the
+# category name is also reflected in the sharded dataset directory.
+category: toy_boat
+
+categories:
+  - ${category}
+
+sharded_name: hc3d_frame_object_${category}
+# sharded_override: false

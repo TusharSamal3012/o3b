@@ -78,17 +78,19 @@ class DenseMatcher(ConfigurableDataset):
                 self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
 
             elif self.cfg.item_type == ItemType.OBJECT_PAIR:
-                src_clauses, src_params   = _build_clauses(prefix="src_o.")
-                trgt_clauses, trgt_params = _build_clauses(prefix="trgt_o.")
+                # Pairs are derived on the fly (all same-category combinations);
+                # no separate `object_pairs` index table is required.
+                src_clauses, src_params   = _build_clauses(prefix="a.")
+                trgt_clauses, trgt_params = _build_clauses(prefix="b.")
                 all_clauses = src_clauses + trgt_clauses
                 all_params  = src_params  + trgt_params
                 limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                 rows = cur.execute(f"""
-                    SELECT op.src_object_id, op.trgt_object_id
-                    FROM object_pairs op
-                    JOIN objects src_o  ON op.src_object_id  = src_o.object_id
-                    JOIN objects trgt_o ON op.trgt_object_id = trgt_o.object_id
-                    WHERE 1=1{all_clauses}{limit_clause}
+                    SELECT a.object_id AS src_object_id, b.object_id AS trgt_object_id
+                    FROM objects a
+                    JOIN objects b ON a.category IS b.category AND a.object_id != b.object_id
+                    WHERE a.category IS NOT NULL{all_clauses}
+                    ORDER BY a.object_id, b.object_id{limit_clause}
                 """, all_params).fetchall()
                 self._object_rows_id = [
                     (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])
@@ -221,12 +223,15 @@ class DenseMatcher(ConfigurableDataset):
 
     @classmethod
     def index(cls, cfg, *, db: Optional[Path] = None, remove: bool = False, max_index: Optional[int] = None, **_) -> None:
-        if cfg.item_type not in (ItemType.OBJECT, ItemType.OBJECT_PAIR):
+        if cfg.item_type == ItemType.OBJECT_PAIR:
+            print(
+                "'object_pair' needs no separate indexing — pairs are derived at load "
+                "time. Run 'index -d dm_object' to build the base index.",
+            )
+            return
+        if cfg.item_type != ItemType.OBJECT:
             print(f"ERROR: item_type '{cfg.item_type}' indexing is not implemented.", file=sys.stderr)
             sys.exit(1)
-        if cfg.item_type == ItemType.OBJECT_PAIR:
-            cls._index_object_pairs(cfg, db=db, remove=remove)
-            return
 
         path_raw        = cls._path_raw(cfg)
         path_preprocess = cls._path_preprocess(cfg)
@@ -331,42 +336,6 @@ class DenseMatcher(ConfigurableDataset):
         con.commit()
         con.close()
         print(f"\nDone. {len(mesh_entries)} object(s) indexed -> {db_path}")
-
-    @classmethod
-    def _index_object_pairs(cls, cfg, *, db: Optional[Path] = None, remove: bool = False) -> None:
-        path_preprocess = cls._path_preprocess(cfg)
-        db_path = db or path_preprocess / "index.db"
-
-        if remove and db_path.exists():
-            print(f"Removing existing index: {db_path}")
-            db_path.unlink()
-
-        if not db_path.exists():
-            print(f"ERROR: {db_path} not found. Run 'index' with item_type=object first.", file=sys.stderr)
-            sys.exit(1)
-
-        con = sqlite3.connect(db_path)
-        cur = con.cursor()
-        cur.execute("DROP TABLE IF EXISTS object_pairs")
-        cur.execute("""
-            CREATE TABLE object_pairs (
-                src_object_id  TEXT NOT NULL,
-                trgt_object_id TEXT NOT NULL,
-                category       TEXT,
-                PRIMARY KEY (src_object_id, trgt_object_id)
-            )
-        """)
-        cur.execute("""
-            INSERT INTO object_pairs (src_object_id, trgt_object_id, category)
-            SELECT a.object_id, b.object_id, a.category
-            FROM objects a
-            JOIN objects b ON a.category IS b.category AND a.object_id != b.object_id
-            WHERE a.category IS NOT NULL
-        """)
-        n_pairs = cur.execute("SELECT COUNT(*) FROM object_pairs").fetchone()[0]
-        con.commit()
-        con.close()
-        print(f"Done. {n_pairs} object pair(s) indexed -> {db_path}")
 
     @classmethod
     def visualize(

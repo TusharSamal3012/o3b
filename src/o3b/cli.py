@@ -2,12 +2,13 @@
 o3b — o3b command-line interface.
 
 Usage:
-  o3b dataset fetch  -d housecorr3d_object_pair [--url URL] [--platform PLATFORM]
-  o3b dataset index  -d housecorr3d_object_pair [--db FILE] [--platform PLATFORM]
-  o3b dataset viz    -d housecorr3d_object_pair [--db FILE] [--limit N] [--object-id ID]
+  o3b dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
+  o3b dataset index  -d hc3d_object        [--db FILE] [--platform PLATFORM]
+  o3b dataset viz    -d hc3d_object_pair   [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
                                          [--debug] [--platform PLATFORM]
+  # Pair datasets need no separate index step (pairs derived at load time).
   o3b bench run      -b <benchmark> [-p <platform>] [-a <ablation>]
   o3b platform setup    -p <platform>
   o3b platform stop  -p <platform> [-y]

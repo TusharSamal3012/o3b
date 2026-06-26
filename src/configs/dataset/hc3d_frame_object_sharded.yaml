@@ -1,0 +1,15 @@
+# Sharded variant of hc3d_frame_object.
+#
+# On first use the items are materialised once into
+#   <path_preprocess>/sharded/<sharded_name>
+# and loaded from there on subsequent runs (HuggingFace save_to_disk / load_from_disk).
+# Set sharded_override: true to rebuild the shards even if they already exist.
+#
+# o3b dataset viz -d hc3d_frame_object_sharded
+
+defaults:
+  - hc3d_frame_object
+  - _self_
+
+sharded_name: hc3d_frame_object
+sharded_override: true

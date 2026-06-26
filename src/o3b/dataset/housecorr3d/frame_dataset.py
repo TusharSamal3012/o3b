@@ -329,6 +329,291 @@ def _add_depth_pc_to_scene(
         return None
 
 
+def _build_frame_sidebar_imgs(fo) -> "dict":
+    """Build the dict of sidebar modality images (rgb, depth, mask, kpts overlays)."""
+    import numpy as np
+
+    imgs = {}
+    if fo.rgb is not None:
+        rgb_np = (fo.rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        imgs["rgb"] = rgb_np
+        if fo.cam_bbox2d is not None:
+            x1, y1, x2, y2 = (int(v) for v in fo.cam_bbox2d.cpu().tolist())
+            bbox_np = rgb_np.copy()
+            H_b, W_b = bbox_np.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(W_b - 1, x2), min(H_b - 1, y2)
+            t = max(2, H_b // 200)  # line thickness
+            color = (255, 220, 0)
+            bbox_np[y1:y1+t, x1:x2+1] = color   # top
+            bbox_np[y2-t:y2, x1:x2+1] = color   # bottom
+            bbox_np[y1:y2+1, x1:x1+t] = color   # left
+            bbox_np[y1:y2+1, x2-t:x2] = color   # right
+            imgs["cam_bbox2d"] = bbox_np
+    if fo.depth is not None:
+        d = fo.depth.cpu().numpy()
+        valid = d > 0
+        d_vis = np.zeros_like(d)
+        if valid.any():
+            d_vis[valid] = d[valid] / d[valid].max()
+        imgs["depth"] = (np.stack([d_vis] * 3, axis=-1) * 255).astype(np.uint8)
+    if fo.fo_mask is not None:
+        m = fo.fo_mask
+        if m.dim() == 3:
+            m = m[0]
+        imgs["mask"] = (
+            np.stack([m.float().cpu().numpy()] * 3, axis=-1) * 255
+        ).astype(np.uint8)
+    _tform_for_kpts = fo.cam_tform4x4_obj_ncds if fo.cam_tform4x4_obj_ncds is not None \
+        else fo.cam_tform4x4_obj
+    if (
+        fo.obj_kpts3d is not None
+        and fo.cam_intr4x4 is not None
+        and _tform_for_kpts is not None
+        and fo.rgb is not None
+    ):
+        try:
+            from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+            from o3b.data.datatypes.object import _draw_kpts2d_on_imgs
+            import torch as _torch
+            H_k, W_k = rgb_np.shape[:2]
+            base_t = _torch.from_numpy(rgb_np).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+            kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
+                pts3d=fo.obj_kpts3d.float().cpu().unsqueeze(0),
+                tform4x4=_tform_for_kpts.float().cpu().unsqueeze(0).unsqueeze(0),
+                intr4x4=fo.cam_intr4x4.float().cpu().unsqueeze(0).unsqueeze(0),
+            )  # (1, K, 2)
+            drawn = _draw_kpts2d_on_imgs(
+                base_t, kpts2d,
+                mask=fo.obj_kpts3d_mask.cpu() if fo.obj_kpts3d_mask is not None else None,
+                radius=max(H_k, W_k) // 50,
+            )
+            imgs["obj_kpts3d"] = (drawn[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            # occlusion-aware visible keypoints only
+            if fo.obj_kpts2d_mask is not None:
+                drawn_vis = _draw_kpts2d_on_imgs(
+                    base_t, kpts2d,
+                    mask=fo.obj_kpts2d_mask.cpu(),
+                    radius=max(H_k, W_k) // 50,
+                )
+                imgs["obj_kpts2d_mask"] = (drawn_vis[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        except Exception:
+            pass
+    return imgs
+
+
+def _kpts_index_colors(n: int) -> "np.ndarray":
+    """Return (n, 3) uint8 colors via an HSV sweep — same index → same color."""
+    import numpy as np
+    import colorsys
+    return np.array(
+        [colorsys.hsv_to_rgb((i / max(n, 1)) % 1.0, 0.85, 1.0) for i in range(n)],
+        dtype=np.float32,
+    ) * 255.0
+
+
+def _add_frame_object_to_scene(
+    server, fo, prefix: str, offset_x: float = 0.0,
+    obj_centric: bool = False, kpt_colors=None,
+) -> list:
+    """Add one frame-object (mesh, camera frustum, rgb/depth, axes, keypoints) to
+    the viser scene under *prefix*, translated by +offset_x along world X.
+
+    Returns the list of created handles. *kpt_colors* (K,3 uint8) colors the 3-D
+    keypoint spheres so corresponding indices match across a pair.
+    """
+    import numpy as np
+
+    handles: list = []
+    offset = torch.eye(4)
+    offset[0, 3] = offset_x
+    pos = (float(offset_x), 0.0, 0.0)
+
+    world_tform4x4_cam = offset
+    if obj_centric:
+        fo, wc = _fo_to_obj_centric(fo)
+        if wc is not None:
+            world_tform4x4_cam = offset @ wc
+
+    H_img = fo.rgb.shape[1] if fo.rgb is not None else 480
+    W_img = fo.rgb.shape[2] if fo.rgb is not None else 640
+
+    handles.extend(_add_axes_to_scene(server, f"{prefix}/camera/axes", world_tform4x4_cam,
+                                      axes_length=0.12, axes_radius=0.005))
+
+    if fo.mesh is not None and fo.cam_tform4x4_obj_ncds is not None:
+        fo_world = fo.transform(fo.cam_tform4x4_obj_ncds)
+        hs = fo_world._build_scene_handles(server, f"{prefix}/object", pos)
+        handles.extend(h for h in hs.values() if h is not None)
+
+    if fo.cam_tform4x4_obj_ncds is not None:
+        ax_len = max(0.05, float(fo.obj_size or 0.2) * 0.75)
+        obj_axes_tform = offset @ fo.cam_tform4x4_obj_ncds.float()
+        handles.extend(_add_axes_to_scene(server, f"{prefix}/object/axes", obj_axes_tform,
+                                          axes_length=ax_len, axes_radius=ax_len * 0.04))
+
+    if fo.cam_intr4x4 is not None:
+        handles.extend(_add_frustum_to_scene(
+            server, fo.cam_intr4x4, H=H_img, W=W_img,
+            name=f"{prefix}/camera/frustum", world_tform4x4_cam=world_tform4x4_cam,
+        ))
+        if fo.rgb is not None:
+            h = _add_rgb_image_to_scene(
+                server, fo.rgb, fo.cam_intr4x4, depth=fo.depth,
+                name=f"{prefix}/camera/rgb", world_tform4x4_cam=world_tform4x4_cam,
+            )
+            if h is not None:
+                handles.append(h)
+        if fo.depth is not None:
+            h = _add_depth_pc_to_scene(
+                server, fo.depth, fo.rgb, fo.cam_intr4x4,
+                name=f"{prefix}/camera/depth_pc", world_tform4x4_cam=world_tform4x4_cam,
+            )
+            if h is not None:
+                handles.append(h)
+
+    # 3-D keypoint spheres (colored by index → correspondence across the pair)
+    if fo.obj_kpts3d is not None and fo.cam_tform4x4_obj_ncds is not None:
+        K = fo.obj_kpts3d.shape[0]
+        kpts_h = torch.cat([fo.obj_kpts3d.float(), torch.ones(K, 1)], dim=-1)  # (K, 4)
+        kpts_world = (offset @ fo.cam_tform4x4_obj_ncds.float() @ kpts_h.T).T[:, :3]
+        if fo.obj_kpts3d_mask is not None:
+            keep = fo.obj_kpts3d_mask.cpu().bool().numpy()
+        else:
+            keep = np.ones(K, dtype=bool)
+        if kpt_colors is None:
+            kpt_colors = _kpts_index_colors(K)
+        pts_np = kpts_world.cpu().numpy()[keep]
+        cols_np = np.asarray(kpt_colors)[keep].astype(np.uint8)
+        if pts_np.shape[0] > 0:
+            try:
+                h = server.scene.add_point_cloud(
+                    f"{prefix}/object/kpts3d",
+                    points=pts_np, colors=cols_np, point_size=0.012,
+                    point_shape="circle",
+                )
+                handles.append(h)
+            except Exception:
+                pass
+
+    return handles
+
+
+def _visualize_frame_object_pairs_viser(dataset, debug: bool = False, obj_centric: bool = False) -> None:
+    """Interactive viser browser for HouseCorr3D frame-object *pairs*.
+
+    Each pair (query=src, target=trgt) is shown side-by-side in the 3-D scene;
+    keypoint spheres are colored by index so the same color marks corresponding
+    keypoints across the two frames.  A sidebar shows each frame's rgb/kpts.
+    """
+    import time
+
+    try:
+        import viser  # noqa: F401
+    except ImportError:
+        print("Install viser: pip install viser")
+        return
+
+    server = viser.ViserServer()
+    server.scene.add_light_ambient("/ambient", intensity=3.0)
+
+    n = len(dataset._frame_pairs_id)
+    if n == 0:
+        print("No frame-object pairs found matching the current config filters.")
+        return
+
+    idx = [0]
+    handles: list = []
+    _img_handle = [None]
+    _mod_dd = [None]
+    _mod_imgs = [{}]
+
+    def _clear() -> None:
+        for h in handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        handles.clear()
+
+    def _update_sidebar_img() -> None:
+        if _mod_dd[0] is None or _img_handle[0] is None:
+            return
+        mod = _mod_dd[0].value
+        if mod in _mod_imgs[0]:
+            _img_handle[0].image = _mod_imgs[0][mod]
+
+    def _load(i: int) -> None:
+        _clear()
+        pair = dataset._load_frame_object_pair(i)
+        src, trgt = pair.src_object, pair.trgt_object
+        if dataset._transform is not None:
+            src, trgt = dataset._transform(src), dataset._transform(trgt)
+
+        # shared per-index keypoint colors so src/trgt correspond
+        K = src.obj_kpts3d.shape[0] if src.obj_kpts3d is not None else 0
+        kpt_colors = _kpts_index_colors(K) if K else None
+
+        # offset target along +x by ~1.5 * its size so the two don't overlap
+        offset_x = 1.5 * max(float(src.obj_size or 0.3), float(trgt.obj_size or 0.3)) + 0.3
+
+        handles.extend(_add_frame_object_to_scene(
+            server, src, "/src", offset_x=0.0, obj_centric=obj_centric, kpt_colors=kpt_colors))
+        handles.extend(_add_frame_object_to_scene(
+            server, trgt, "/trgt", offset_x=offset_x, obj_centric=obj_centric, kpt_colors=kpt_colors))
+
+        # sidebar: src + trgt modality images
+        src_imgs  = {f"src/{k}": v  for k, v in _build_frame_sidebar_imgs(src).items()}
+        trgt_imgs = {f"trgt/{k}": v for k, v in _build_frame_sidebar_imgs(trgt).items()}
+        imgs = {**src_imgs, **trgt_imgs}
+        _mod_imgs[0] = imgs
+        if imgs:
+            keys = list(imgs.keys())
+            if _mod_dd[0] is None:
+                _mod_dd[0] = server.gui.add_dropdown("Modality", options=keys, initial_value=keys[0])
+
+                @_mod_dd[0].on_update
+                def _(_e):
+                    _update_sidebar_img()
+            else:
+                _mod_dd[0].options = keys
+                if _mod_dd[0].value not in keys:
+                    _mod_dd[0].value = keys[0]
+            mod = _mod_dd[0].value if _mod_dd[0].value in imgs else keys[0]
+            if _img_handle[0] is None:
+                _img_handle[0] = server.gui.add_image(imgs[mod], label="Frame")
+            else:
+                _img_handle[0].image = imgs[mod]
+
+        label.value = (f"[{i + 1}/{n}]  {src.object_id}  <-->  {trgt.object_id}")
+        print(f"  [{i + 1}/{n}] {src.object_id}  <-->  {trgt.object_id}")
+
+    with server.gui.add_folder("Navigation"):
+        label    = server.gui.add_text("Item", initial_value="loading…")
+        btn_prev = server.gui.add_button("← Prev")
+        btn_next = server.gui.add_button("Next →")
+
+    @btn_prev.on_click
+    def _(_):
+        idx[0] = (idx[0] - 1) % n
+        _load(idx[0])
+
+    @btn_next.on_click
+    def _(_):
+        idx[0] = (idx[0] + 1) % n
+        _load(idx[0])
+
+    _load(0)
+    print(f"\nViser running at http://localhost:{server.get_port()}")
+    print("Use Prev / Next in the panel to browse. Press Ctrl+C to exit.\n")
+
+    try:
+        while True:
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("\nStopping.")
+
+
 def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bool = False) -> None:
     """Interactive viser browser for HouseCorr3D frame-object items.
 
@@ -364,67 +649,6 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
                 pass
         handles.clear()
 
-    def _build_sidebar_imgs(fo) -> "dict":
-        imgs = {}
-        if fo.rgb is not None:
-            rgb_np = (fo.rgb.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-            imgs["rgb"] = rgb_np
-            if fo.cam_bbox2d is not None:
-                x1, y1, x2, y2 = (int(v) for v in fo.cam_bbox2d.cpu().tolist())
-                bbox_np = rgb_np.copy()
-                H_b, W_b = bbox_np.shape[:2]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(W_b - 1, x2), min(H_b - 1, y2)
-                t = max(2, H_b // 200)  # line thickness
-                color = (255, 220, 0)
-                bbox_np[y1:y1+t, x1:x2+1] = color   # top
-                bbox_np[y2-t:y2, x1:x2+1] = color   # bottom
-                bbox_np[y1:y2+1, x1:x1+t] = color   # left
-                bbox_np[y1:y2+1, x2-t:x2] = color   # right
-                imgs["cam_bbox2d"] = bbox_np
-        if fo.depth is not None:
-            d = fo.depth.cpu().numpy()
-            valid = d > 0
-            d_vis = np.zeros_like(d)
-            if valid.any():
-                d_vis[valid] = d[valid] / d[valid].max()
-            imgs["depth"] = (np.stack([d_vis] * 3, axis=-1) * 255).astype(np.uint8)
-        if fo.fo_mask is not None:
-            m = fo.fo_mask
-            if m.dim() == 3:
-                m = m[0]
-            imgs["mask"] = (
-                np.stack([m.float().cpu().numpy()] * 3, axis=-1) * 255
-            ).astype(np.uint8)
-        _tform_for_kpts = fo.cam_tform4x4_obj_ncds if fo.cam_tform4x4_obj_ncds is not None \
-            else fo.cam_tform4x4_obj
-        if (
-            fo.obj_kpts3d is not None
-            and fo.cam_intr4x4 is not None
-            and _tform_for_kpts is not None
-            and fo.rgb is not None
-        ):
-            try:
-                from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
-                from o3b.data.datatypes.object import _draw_kpts2d_on_imgs
-                import torch as _torch
-                H_k, W_k = rgb_np.shape[:2]
-                base_t = _torch.from_numpy(rgb_np).permute(2, 0, 1).float().unsqueeze(0) / 255.0
-                kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
-                    pts3d=fo.obj_kpts3d.float().cpu().unsqueeze(0),
-                    tform4x4=_tform_for_kpts.float().cpu().unsqueeze(0).unsqueeze(0),
-                    intr4x4=fo.cam_intr4x4.float().cpu().unsqueeze(0).unsqueeze(0),
-                )  # (1, K, 2)
-                drawn = _draw_kpts2d_on_imgs(
-                    base_t, kpts2d,
-                    mask=fo.obj_kpts3d_mask.cpu() if fo.obj_kpts3d_mask is not None else None,
-                    radius=max(H_k, W_k) // 50,
-                )
-                imgs["obj_kpts3d"] = (drawn[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-            except Exception:
-                pass
-        return imgs
-
     def _update_sidebar_img() -> None:
         if _mod_dd[0] is None or _img_handle[0] is None:
             return
@@ -435,9 +659,12 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
 
     def _load(i: int) -> None:
         _clear()
-        fo = dataset._load_frame_object(i)
-        if dataset._transform is not None:
-            fo = dataset._transform(fo)
+        if getattr(dataset, "_sharded", None) is not None:
+            fo = dataset[i]  # reads from shards; applies transform internally
+        else:
+            fo = dataset._load_frame_object(i)
+            if dataset._transform is not None:
+                fo = dataset._transform(fo)
 
         H_img = fo.rgb.shape[1] if fo.rgb is not None else 480
         W_img = fo.rgb.shape[2] if fo.rgb is not None else 640
@@ -491,7 +718,7 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
                     handles.append(h)
 
         # ── sidebar modality images ───────────────────────────────────────────
-        imgs = _build_sidebar_imgs(fo_for_sidebar)
+        imgs = _build_frame_sidebar_imgs(fo_for_sidebar)
         _mod_imgs[0] = imgs
         if imgs:
             keys = list(imgs.keys())
@@ -561,9 +788,10 @@ def _index_scene(
 ) -> tuple[int, int]:
     """Insert frame-object rows for one scene. Returns (n_total, n_matching).
 
-    n_matching counts rows that satisfy the index-time filter:
-    - filter_kpts=True  → only rows with has_kpts=1
-    - filter_kpts=False → same as n_total
+    n_matching counts rows that satisfy the load-time filter, so that *limit*
+    reflects the number of actually-loadable items:
+    - is_valid=1 is always required (matches the load-time query)
+    - filter_kpts=True additionally requires has_kpts=1
 
     Stops early once *limit* matching rows have been inserted (None = no limit).
     """
@@ -669,11 +897,127 @@ def _index_scene(
                 ),
             )
             n += 1
-            if not filter_kpts or has_kpts:
+            # Match the load-time filter (always requires is_valid=1) so that
+            # *limit* caps the number of actually-loadable rows.
+            if is_valid and (not filter_kpts or has_kpts):
                 n_match += 1
             if limit is not None and n_match >= limit:
                 return n, n_match
     return n, n_match
+
+
+# ── keypoint 2-D visibility (occlusion-aware) ─────────────────────────────────
+
+def render_scene_depth(
+    meshes_cam: "list[tuple[torch.Tensor, torch.Tensor]]",
+    cam_intr4x4: torch.Tensor,
+    H: int,
+    W: int,
+) -> "Optional[torch.Tensor]":
+    """Render a depth (z-)buffer of all object meshes in camera space.
+
+    Args:
+        meshes_cam: list of (verts_cam (N, 3), faces (F, 3)) already transformed
+            into OpenGL camera space (-Z forward).
+        cam_intr4x4: (4, 4) full-image intrinsics.
+        H, W: render resolution (must match cam_intr4x4's image).
+
+    Returns:
+        (H, W) float32 depth in metres (0 = background / no hit), or None.
+    """
+    import numpy as np
+    import trimesh
+    from o3b.cv.visual.show import render_trimesh_to_tensor
+
+    tms = []
+    for verts, faces in meshes_cam:
+        if verts is None or faces is None or verts.numel() == 0 or faces.numel() == 0:
+            continue
+        tms.append(trimesh.Trimesh(
+            vertices=verts.detach().cpu().numpy().astype(np.float64),
+            faces=faces.detach().cpu().numpy(),
+            process=False,
+        ))
+    if not tms:
+        return None
+    scene = trimesh.util.concatenate(tms)
+    # Verts are already in camera space → render with an identity extrinsic.
+    _, depth = render_trimesh_to_tensor(
+        scene, cam_intr4x4.float().cpu(), torch.eye(4), H=H, W=W,
+    )
+    return depth[0]  # (H, W)
+
+
+def visible_vertices_from_render(
+    target_verts_cam: torch.Tensor,  # (N, 3) target mesh verts in camera space
+    depth_render: torch.Tensor,      # (H, W) rendered all-objects scene depth (metres)
+    cam_intr4x4: torch.Tensor,       # (4, 4)
+    H: int,
+    W: int,
+    obj_size: "Optional[float]" = None,
+    abs_eps: float = 0.002,
+    rel_eps: float = 0.02,
+) -> torch.Tensor:
+    """Determine which target mesh vertices are visible (front-most surface).
+
+    A vertex is visible if it projects in front of the camera, inside the image,
+    and is the front-most surface at its pixel in the all-objects render — i.e.
+    nothing (another object or the object's own geometry) lies in front of it.
+    Occlusion is resolved by the rasteriser's z-buffer in ``depth_render``; the
+    small epsilon only absorbs render/projection discretisation, it is not a
+    free depth-matching tolerance.
+
+    Returns (N,) bool over the mesh vertices.
+    """
+    N = target_verts_cam.shape[0]
+    vis = torch.zeros(N, dtype=torch.bool)
+    if N == 0 or depth_render is None:
+        return vis
+
+    eps = max(abs_eps, rel_eps * float(obj_size)) if obj_size else abs_eps
+    fx, fy = float(cam_intr4x4[0, 0]), float(cam_intr4x4[1, 1])
+    cx, cy = float(cam_intr4x4[0, 2]), float(cam_intr4x4[1, 2])
+
+    verts = target_verts_cam.float()
+    X, Y, Z = verts[:, 0], verts[:, 1], verts[:, 2]
+    zpos = (-Z).clamp(min=1e-6)                  # OpenGL: in front ⇒ Z < 0
+    u = (cx + fx * X / zpos).round().long()
+    v = (cy - fy * Y / zpos).round().long()
+    inb = (Z < 0) & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    idx = inb.nonzero(as_tuple=True)[0]
+    if idx.numel() == 0:
+        return vis
+    dr = depth_render[v[idx], u[idx]]
+    # not occluded: rendered front surface is at the vertex (within eps), not closer
+    front = (dr > 0) & ((zpos[idx] - dr) <= eps)
+    vis[idx[front]] = True
+    return vis
+
+
+def kpts2d_mask_from_visible_verts(
+    kpts_ncds: torch.Tensor,        # (K, 3) keypoints in NCDS space
+    verts_ncds: torch.Tensor,       # (N, 3) mesh verts in NCDS space
+    visible_verts: torch.Tensor,    # (N,) bool
+    obj_kpts3d_mask: "Optional[torch.Tensor]" = None,  # (K,) bool annotation validity
+    norm_size: float = 2.0,         # NCDS object size (obj_size_ncds)
+    rel_radius: float = 0.05,       # visible vertex must be within rel_radius * norm_size
+) -> torch.Tensor:
+    """A keypoint is visible iff a visible vertex lies within ``rel_radius *
+    norm_size`` of it (distance in NCDS space). Gated by ``obj_kpts3d_mask`` so
+    only annotated keypoints can be marked visible.
+
+    Returns (K,) bool.
+    """
+    K = kpts_ncds.shape[0]
+    out = torch.zeros(K, dtype=torch.bool)
+    if visible_verts is not None and visible_verts.any():
+        radius = rel_radius * float(norm_size)
+        vis_pts = verts_ncds.float()[visible_verts.bool()]   # (M, 3)
+        nearest = torch.cdist(kpts_ncds.float(), vis_pts).min(dim=1).values  # (K,)
+        out = nearest < radius
+    if obj_kpts3d_mask is not None:
+        out = out & obj_kpts3d_mask.bool().cpu()
+    return out
 
 
 # ── modality loaders ─────────────────────────────────────────────────────────

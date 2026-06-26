@@ -39,8 +39,12 @@ class HouseCorr3D(ConfigurableDataset):
         return self.path_raw / "Meta"
 
     def __len__(self):
+        if self._sharded is not None:
+            return len(self._sharded)
         if self.cfg.item_type == ItemType.FRAME_OBJECT:
             return len(self._frame_rows_id)
+        if self.cfg.item_type == ItemType.FRAME_OBJECT_PAIR:
+            return len(self._frame_pairs_id)
         return len(self._object_rows_id)
 
     def _setup(self) -> None:
@@ -49,6 +53,7 @@ class HouseCorr3D(ConfigurableDataset):
         self._obj_by_id: dict[str, dict] = {}
         self._frame_rows: list[dict] = []
         self._frame_rows_id: list[int] = []
+        self._frame_pairs_id: list[tuple[int, int]] = []
 
         # Always load the objects table from index.db — used for mesh lookup in all item types.
         db_path = self.path_preprocess / "index.db"
@@ -84,31 +89,32 @@ class HouseCorr3D(ConfigurableDataset):
                     self._object_rows_id = [_id_to_idx[r["object_id"]] for r in rows]
 
                 elif self.cfg.item_type == ItemType.OBJECT_PAIR:
+                    # Pairs are derived on the fly (all same-category combinations);
+                    # no separate `object_pairs` index table is required.
                     kpts_clause = (
-                        " AND src_o.obj_kpts3d IS NOT NULL AND trgt_o.obj_kpts3d IS NOT NULL"
+                        " AND a.obj_kpts3d IS NOT NULL AND b.obj_kpts3d IS NOT NULL"
                         if self.cfg.filter_has_kpts else ""
                     )
                     real_clause = (
-                        " AND src_o.object_id LIKE '%real%' AND trgt_o.object_id LIKE '%real%'"
+                        " AND a.object_id LIKE '%real%' AND b.object_id LIKE '%real%'"
                         if self.cfg.filter_is_real is True
-                        else " AND src_o.object_id NOT LIKE '%real%' AND trgt_o.object_id NOT LIKE '%real%'"
+                        else " AND a.object_id NOT LIKE '%real%' AND b.object_id NOT LIKE '%real%'"
                         if self.cfg.filter_is_real is False
                         else ""
                     )
                     limit_clause = f" LIMIT {self.cfg.filter_count_max}" if self.cfg.filter_count_max else ""
                     if cats:
                         placeholders = ", ".join("?" * len(cats))
-                        cat_clause   = (f" AND src_o.category IN ({placeholders})"
-                                        f" AND trgt_o.category IN ({placeholders})")
-                        params = list(cats) + list(cats)
+                        cat_clause   = f" AND a.category IN ({placeholders})"
+                        params       = list(cats)
                     else:
                         cat_clause, params = "", []
                     rows = cur.execute(f"""
-                        SELECT op.src_object_id, op.trgt_object_id
-                        FROM object_pairs op
-                        JOIN objects src_o  ON op.src_object_id  = src_o.object_id
-                        JOIN objects trgt_o ON op.trgt_object_id = trgt_o.object_id
-                        WHERE 1=1{kpts_clause}{real_clause}{cat_clause}{limit_clause}
+                        SELECT a.object_id AS src_object_id, b.object_id AS trgt_object_id
+                        FROM objects a
+                        JOIN objects b ON a.category IS b.category AND a.object_id != b.object_id
+                        WHERE a.category IS NOT NULL{kpts_clause}{real_clause}{cat_clause}
+                        ORDER BY a.object_id, b.object_id{limit_clause}
                     """, params).fetchall()
                     self._object_rows_id = [
                         (_id_to_idx[r["src_object_id"]], _id_to_idx[r["trgt_object_id"]])
@@ -117,7 +123,7 @@ class HouseCorr3D(ConfigurableDataset):
             finally:
                 con.close()
 
-        if self.cfg.item_type == ItemType.FRAME_OBJECT:
+        if self.cfg.item_type in (ItemType.FRAME_OBJECT, ItemType.FRAME_OBJECT_PAIR):
             frames_db = self.path_preprocess / "frames.db"
             if not frames_db.exists():
                 return
@@ -159,6 +165,32 @@ class HouseCorr3D(ConfigurableDataset):
                 self._frame_rows_id = [r[0] - 1 for r in frows]
             finally:
                 con2.close()
+
+            if self.cfg.item_type == ItemType.FRAME_OBJECT_PAIR:
+                self._frame_pairs_id = self._build_frame_pairs()
+
+    def _build_frame_pairs(self) -> list[tuple[int, int]]:
+        """Pair filtered frame rows within each category (sliding consecutive pairs).
+
+        Each pair (i, j) references two indices into self._frame_rows; a query
+        frame is paired with the next frame of the same category, requiring a
+        different object instance so the correspondence is non-trivial.
+        """
+        by_cat: dict = {}
+        for rid in self._frame_rows_id:
+            cat = self._frame_rows[rid].get("category")
+            by_cat.setdefault(cat, []).append(rid)
+
+        pairs: list[tuple[int, int]] = []
+        for rids in by_cat.values():
+            for a, b in zip(rids, rids[1:]):
+                if self._frame_rows[a].get("object_id") != self._frame_rows[b].get("object_id"):
+                    pairs.append((a, b))
+
+        limit = self.cfg.filter_count_max
+        if limit:
+            pairs = pairs[:limit]
+        return pairs
 
     def _load_object(self, idx: int) -> Object:
         return self._load_object_from_row(self._object_rows[self._object_rows_id[idx]])
@@ -280,12 +312,16 @@ class HouseCorr3D(ConfigurableDataset):
         if cfg.item_type == ItemType.FRAME_OBJECT:
             cls._index_frames(cfg, db=db, **kwargs)
             return
-        if cfg.item_type not in (ItemType.OBJECT, ItemType.OBJECT_PAIR):
+        if cfg.item_type in (ItemType.OBJECT_PAIR, ItemType.FRAME_OBJECT_PAIR):
+            base = "object" if cfg.item_type == ItemType.OBJECT_PAIR else "frame_object"
+            print(
+                f"'{cfg.item_type.value}' needs no separate indexing — pairs are derived "
+                f"at load time. Run 'index -d hc3d_{base}' to build the base index.",
+            )
+            return
+        if cfg.item_type != ItemType.OBJECT:
             print(f"ERROR: item_type '{cfg.item_type}' indexing is not implemented.", file=sys.stderr)
             sys.exit(1)
-        if cfg.item_type == ItemType.OBJECT_PAIR:
-            cls._index_object_pairs(cfg, db=db)
-            return
         path_raw = cls._path_raw(cfg)
         path_preprocess = cls._path_preprocess(cfg)
 
@@ -409,49 +445,6 @@ class HouseCorr3D(ConfigurableDataset):
 
         con.close()
         print(f"\nDone. {len(mesh_entries)} object(s) indexed -> {db_path}")
-
-    @classmethod
-    def _index_object_pairs(cls, cfg, *, db: Optional[Path] = None) -> None:
-        path_preprocess = cls._path_preprocess(cfg)
-        db_path = db or path_preprocess / "index.db"
-
-        if not db_path.exists():
-            print(f"ERROR: {db_path} not found. Run 'index' with item_type=object first.", file=sys.stderr)
-            sys.exit(1)
-
-        con = sqlite3.connect(db_path)
-        cur = con.cursor()
-
-        existing = cur.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='objects'"
-        ).fetchone()
-        if not existing:
-            print("ERROR: 'objects' table not found. Run 'index' with item_type=object first.", file=sys.stderr)
-            con.close()
-            sys.exit(1)
-
-        cur.execute("DROP TABLE IF EXISTS object_pairs")
-        cur.execute("""
-            CREATE TABLE object_pairs (
-                src_object_id  TEXT NOT NULL,
-                trgt_object_id TEXT NOT NULL,
-                category       TEXT,
-                PRIMARY KEY (src_object_id, trgt_object_id)
-            )
-        """)
-
-        cur.execute("""
-            INSERT INTO object_pairs (src_object_id, trgt_object_id, category)
-            SELECT a.object_id, b.object_id, a.category
-            FROM objects a
-            JOIN objects b ON a.category IS b.category AND a.object_id != b.object_id
-            WHERE a.category IS NOT NULL
-        """)
-
-        n_pairs = cur.execute("SELECT COUNT(*) FROM object_pairs").fetchone()[0]
-        con.commit()
-        con.close()
-        print(f"Done. {n_pairs} object pair(s) indexed -> {db_path}")
 
     @classmethod
     def _index_frames(
@@ -599,6 +592,11 @@ class HouseCorr3D(ConfigurableDataset):
                                           render=render, debug=debug, obj_centric=obj_centric)
             return
 
+        if cfg.item_type == ItemType.FRAME_OBJECT_PAIR:
+            cls._visualize_frame_object_pairs(cfg, db=db, limit=limit, object_id=object_id,
+                                              debug=debug, obj_centric=obj_centric)
+            return
+
         path_preprocess = cls._path_preprocess(cfg)
         db_path = db or path_preprocess / "index.db"
         if not db_path.exists():
@@ -695,6 +693,47 @@ class HouseCorr3D(ConfigurableDataset):
 
         _visualize_frame_objects_viser(dataset, debug=debug, obj_centric=obj_centric)
 
+    @classmethod
+    def _visualize_frame_object_pairs(
+        cls,
+        cfg,
+        *,
+        db: Optional[Path] = None,
+        limit: int = 20,
+        object_id: Optional[str] = None,
+        debug: bool = False,
+        obj_centric: bool = False,
+    ) -> None:
+        from o3b.dataset.housecorr3d.frame_dataset import _visualize_frame_object_pairs_viser
+        from dataclasses import replace as _r
+
+        path_preprocess = cls._path_preprocess(cfg)
+        db_path = db or path_preprocess / "frames.db"
+        if not db_path.exists():
+            print(f"No index found at {db_path}. Run 'index' first.", file=sys.stderr)
+            sys.exit(1)
+
+        # Load all modalities for visualization
+        viz_cfg = _r(cfg, modalities=None, object_modalities=None)
+        dataset = cls(viz_cfg)
+        if not dataset._frame_pairs_id:
+            print("No frame-object pairs found matching the current config filters.")
+            return
+
+        total = len(dataset._frame_pairs_id)
+        if object_id:
+            dataset._frame_pairs_id = [
+                (a, b) for (a, b) in dataset._frame_pairs_id
+                if dataset._frame_rows[a].get("object_id") == object_id
+                or dataset._frame_rows[b].get("object_id") == object_id
+            ]
+        if limit < len(dataset._frame_pairs_id):
+            dataset._frame_pairs_id = dataset._frame_pairs_id[:limit]
+
+        print(f"Showing {len(dataset._frame_pairs_id)} / {total} frame pairs  {db_path}\n")
+
+        _visualize_frame_object_pairs_viser(dataset, debug=debug, obj_centric=obj_centric)
+
     # ── item loading ──────────────────────────────────────────────────────────
 
     def _load_frame_object(self, idx: int) -> FrameObject:
@@ -706,11 +745,26 @@ class HouseCorr3D(ConfigurableDataset):
         cam_tform4x4_obj_ncds = cam_tform4x4_obj_metric @ obj_ncds0c_tform4x4_obj
         maps NCDS → camera space in metric units.
         """
+        return self._load_frame_object_by_rowidx(self._frame_rows_id[idx])
+
+    def _load_frame_object_pair(self, idx: int) -> ObjectPair:
+        """Load a frame-object pair: query (src) and target (trgt) FrameObjects."""
+        src_rowidx, trgt_rowidx = self._frame_pairs_id[idx]
+        src_fo  = self._load_frame_object_by_rowidx(src_rowidx)
+        trgt_fo = self._load_frame_object_by_rowidx(trgt_rowidx)
+        return ObjectPair(
+            src_object_id  = src_fo.object_id,
+            trgt_object_id = trgt_fo.object_id,
+            src_object     = src_fo,
+            trgt_object    = trgt_fo,
+        )
+
+    def _load_frame_object_by_rowidx(self, row_idx: int) -> FrameObject:
         from o3b.dataset.housecorr3d.frame_dataset import (
             _load_image_tensor, _load_depth_tensor, _load_mask_tensor,
         )
 
-        row  = self._frame_rows[self._frame_rows_id[idx]]
+        row  = self._frame_rows[row_idx]
         mods = self.cfg.modalities
         oid       = row.get("object_id", "")
         obj_scale = float(row.get("obj_scale") or 1.0)
@@ -772,6 +826,15 @@ class HouseCorr3D(ConfigurableDataset):
             if cam_tform4x4_obj_metric is not None and _want("cam_tform4x4_obj_ncds", mods):
                 cam_tform4x4_obj_ncds = cam_tform4x4_obj_metric @ tform.float()
 
+        # ── occlusion-aware 2-D keypoint visibility ───────────────────────────
+        obj_kpts2d_mask = None
+        if (_want("obj_kpts2d_mask", mods) and obj is not None and obj.mesh is not None
+                and obj.obj_kpts3d is not None and cam_tform4x4_obj_metric is not None
+                and tform is not None and row.get("cam_intr4x4")):
+            obj_kpts2d_mask = self._compute_obj_kpts2d_mask(
+                row, obj, cam_tform4x4_obj_metric, tform, rgb=rgb, mask=mask,
+            )
+
         return FrameObject(
             frame_id                = row.get("frame_id", ""),
             frame_object_id         = row.get("frame_id", ""),
@@ -791,7 +854,128 @@ class HouseCorr3D(ConfigurableDataset):
             obj_size                = obj_size,
             obj_kpts3d              = obj.obj_kpts3d      if obj is not None else None,
             obj_kpts3d_mask         = obj.obj_kpts3d_mask if obj is not None else None,
+            obj_kpts2d_mask         = obj_kpts2d_mask,
             category                = row.get("category") if _want("category", mods) else None,
+        )
+
+    # ── occlusion-aware keypoint visibility helpers ───────────────────────────
+
+    def _cam_tform4x4_obj_metric(self, row) -> "Optional[torch.Tensor]":
+        """Metric cam←obj SE(3) for a frame row (SVD-normalised R, obj_scale embedded)."""
+        raw = row.get("cam_tform4x4_obj")
+        if not raw:
+            return None
+        M = torch.tensor(json.loads(raw), dtype=torch.float32)
+        if self.cfg.cam_tform4x4_cam_raw is not None:
+            C = torch.tensor(self.cfg.cam_tform4x4_cam_raw, dtype=torch.float32)
+            M = C @ M
+        obj_scale = float(row.get("obj_scale") or 1.0)
+        U, _, Vh = torch.linalg.svd(M[:3, :3].float())
+        out = M.clone().float()
+        out[:3, :3] = (U @ Vh) * obj_scale
+        return out
+
+    def _obj_cam_mesh(self, row) -> "Optional[tuple]":
+        """Return (verts_cam (N,3), faces (F,3)) for a frame row's object in camera space."""
+        oid = row.get("object_id", "")
+        obj_row = self._obj_by_id.get(oid)
+        if obj_row is None:
+            return None
+        metric = self._cam_tform4x4_obj_metric(row)
+        if metric is None:
+            return None
+        obj = self._load_object_from_row(obj_row)
+        if obj is None or obj.mesh is None:
+            return None
+        tform = obj.obj_ncds0c_tform4x4_obj
+        ncds = (metric @ tform.float()) if tform is not None else metric
+        R, t = ncds[:3, :3], ncds[:3, 3]
+        verts_cam = (R @ obj.mesh.verts.float().t()).t() + t
+        return verts_cam, obj.mesh.faces
+
+    def _frame_siblings(self, row) -> list:
+        """All valid object rows sharing the same scene frame as *row* (incl. itself)."""
+        if getattr(self, "_frame_to_rows", None) is None:
+            m: dict[str, list] = {}
+            for r in self._frame_rows:
+                if not int(r.get("is_valid", 1) or 0):
+                    continue
+                key = r.get("frame_id", "").rsplit("/", 1)[0]
+                m.setdefault(key, []).append(r)
+            self._frame_to_rows = m
+        key = row.get("frame_id", "").rsplit("/", 1)[0]
+        return self._frame_to_rows.get(key, [row])
+
+    def _frame_image_hw(self, rgb, mask, intr) -> tuple:
+        """Full-image (H, W): prefer a loaded modality, then cfg.extra, then intrinsics."""
+        if rgb is not None:
+            return int(rgb.shape[-2]), int(rgb.shape[-1])
+        if mask is not None:
+            return int(mask.shape[-2]), int(mask.shape[-1])
+        img_size = (self.cfg.extra or {}).get("image_size")
+        if img_size:
+            return int(img_size[0]), int(img_size[1])
+        if intr is not None:
+            return int(round(2 * float(intr[1, 2]))), int(round(2 * float(intr[0, 2])))
+        return None, None
+
+    def _compute_obj_kpts2d_mask(self, row, obj, cam_tform4x4_obj_metric, tform,
+                                 rgb=None, mask=None) -> "Optional[torch.Tensor]":
+        """Occlusion-aware per-keypoint 2-D visibility for the target object.
+
+        Renders all objects in the frame to a depth buffer (cached per frame) to
+        determine which of the target mesh's vertices are the front-most surface
+        (visible). A keypoint is then visible iff a visible vertex lies within
+        0.1 * normalised object size of it (NCDS space), and only where the
+        keypoint annotation (obj_kpts3d_mask) is valid.
+        """
+        from o3b.dataset.housecorr3d.frame_dataset import (
+            render_scene_depth, visible_vertices_from_render,
+            kpts2d_mask_from_visible_verts,
+        )
+
+        intr_full = torch.tensor(json.loads(row["cam_intr4x4"]), dtype=torch.float32)
+        H, W = self._frame_image_hw(rgb, mask, intr_full)
+        if H is None:
+            return None
+
+        # rendered scene depth for this frame, shared across its objects
+        key = row.get("frame_id", "").rsplit("/", 1)[0]
+        cache = getattr(self, "_scene_depth_cache", None)
+        if cache is None:
+            cache = self._scene_depth_cache = {}
+        if key in cache:
+            depth_render = cache[key]
+        else:
+            meshes_cam = [g for g in (self._obj_cam_mesh(r) for r in self._frame_siblings(row))
+                          if g is not None]
+            depth_render = render_scene_depth(meshes_cam, intr_full, H, W)
+            if len(cache) >= 8:
+                cache.clear()
+            cache[key] = depth_render
+        if depth_render is None:
+            return None
+
+        # target mesh verts in camera space (same transform chain as the scene render)
+        ncds = cam_tform4x4_obj_metric @ tform.float()
+        R, t = ncds[:3, :3], ncds[:3, 3]
+        verts_cam = (R @ obj.mesh.verts.float().t()).t() + t
+
+        obj_scale = float(row.get("obj_scale") or 1.0)
+        obj_size  = (obj.obj_size * obj_scale) if obj.obj_size is not None else None
+
+        # which vertices are visible (front-most surface in the all-objects render)
+        visible_verts = visible_vertices_from_render(
+            verts_cam, depth_render, intr_full, H, W, obj_size=obj_size,
+        )
+        # keypoint visible iff a visible vertex is nearby (NCDS), and annotated
+        return kpts2d_mask_from_visible_verts(
+            kpts_ncds       = obj.obj_kpts3d,
+            verts_ncds      = obj.mesh.verts,
+            visible_verts   = visible_verts,
+            obj_kpts3d_mask = obj.obj_kpts3d_mask,
+            norm_size       = 2.0,   # obj_size_ncds
+            rel_radius      = 0.05,
         )
 
     def _load_scene_object(self, idx: int) -> SceneObject:

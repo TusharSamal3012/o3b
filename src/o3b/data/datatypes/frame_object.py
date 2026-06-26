@@ -14,6 +14,7 @@ class FrameObject(Frame, Object):
     cam_bbox2d:       Optional[Tensor] = None  # (4,)     xyxy pixels
     cam_bbox3d:       Optional[Tensor] = None  # (3,) obj-space side lengths for draw_bbox3d, or (8, 3) cam-space corners
     fo_mask:          Optional[Tensor] = None  # (H, W)   bool  object-instance mask
+    obj_kpts2d_mask:  Optional[Tensor] = None  # (K,)     bool  keypoint visible in this frame (occlusion-aware)
     cam_tform4x4_obj:      Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
     cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (4, 4)  ncds→cam (= cam_tform4x4_obj @ obj_ncds0c_tform4x4_obj)
 
@@ -94,6 +95,13 @@ class FrameObject(Frame, Object):
                 self.cam_intr4x4.cpu(),
                 _tform_kpts.cpu(),
             ))
+            if self.obj_kpts2d_mask is not None:
+                layers["obj_kpts2d_mask"] = ("draw_kpts2d", (
+                    self.obj_kpts3d.cpu(),
+                    self.obj_kpts2d_mask.cpu(),
+                    self.cam_intr4x4.cpu(),
+                    _tform_kpts.cpu(),
+                ))
 
         if not layers:
             return None
@@ -146,25 +154,26 @@ class FrameObject(Frame, Object):
                 except Exception:
                     pass
 
-            if "obj_kpts3d" in layers and active.get("obj_kpts3d", True):
-                from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
-                from o3b.data.datatypes.object import _draw_kpts2d_on_imgs
-                try:
-                    kpts3d, kpts_mask, cam_intr4x4, cam_tform = layers["obj_kpts3d"][1]
-                    H_c, W_c = canvas_t.shape[-2:]
-                    kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
-                        pts3d=kpts3d.unsqueeze(0),
-                        tform4x4=cam_tform.unsqueeze(0).unsqueeze(0),
-                        intr4x4=cam_intr4x4.unsqueeze(0).unsqueeze(0),
-                    )  # (1, K, 2)
-                    canvas_t = _draw_kpts2d_on_imgs(
-                        canvas_t.unsqueeze(0),
-                        kpts2d,
-                        mask=kpts_mask,
-                        radius=max(H_c, W_c) // 50,
-                    )[0]
-                except Exception:
-                    pass
+            for _kpts_key in ("obj_kpts3d", "obj_kpts2d_mask"):
+                if _kpts_key in layers and active.get(_kpts_key, True):
+                    from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
+                    from o3b.data.datatypes.object import _draw_kpts2d_on_imgs
+                    try:
+                        kpts3d, kpts_mask, cam_intr4x4, cam_tform = layers[_kpts_key][1]
+                        H_c, W_c = canvas_t.shape[-2:]
+                        kpts2d = proj3d2d_tform4x4_intr4x4_broadcast(
+                            pts3d=kpts3d.unsqueeze(0),
+                            tform4x4=cam_tform.unsqueeze(0).unsqueeze(0),
+                            intr4x4=cam_intr4x4.unsqueeze(0).unsqueeze(0),
+                        )  # (1, K, 2)
+                        canvas_t = _draw_kpts2d_on_imgs(
+                            canvas_t.unsqueeze(0),
+                            kpts2d,
+                            mask=kpts_mask,
+                            radius=max(H_c, W_c) // 50,
+                        )[0]
+                    except Exception:
+                        pass
 
             return np.clip(canvas_t.permute(1, 2, 0).numpy(), 0, 1)
 
@@ -227,6 +236,7 @@ class FrameObjectBatch:
     cam_bbox2d:       Optional[Tensor]       = None  # (B, 4)
     cam_bbox3d:       Optional[Tensor]       = None  # (B, 8, 3)
     fo_mask:          Optional[Tensor]       = None  # (B, H, W)
+    obj_kpts2d_mask:  Optional[Tensor]       = None  # (B, K)    bool
     cam_tform4x4_obj: Optional[Tensor]       = None  # (B, 4, 4)
     # object
     pts3d:                   Optional[Tensor] = None  # (B, N, 3)
@@ -274,6 +284,7 @@ def collate_frame_objects(
         cam_bbox2d       = _get("cam_bbox2d"),
         cam_bbox3d       = _get("cam_bbox3d"),
         fo_mask          = _get("fo_mask"),
+        obj_kpts2d_mask  = _get("obj_kpts2d_mask"),
         cam_tform4x4_obj = _get("cam_tform4x4_obj"),
         pts3d                   = _get("pts3d"),
         pts3d_feats             = _get("pts3d_feats"),
