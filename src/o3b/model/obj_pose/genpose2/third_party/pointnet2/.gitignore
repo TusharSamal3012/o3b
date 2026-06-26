@@ -1,0 +1,4 @@
+src/pointnet2/build/
+src/pointnet2/dist/
+src/pointnet2/pointnet2.egg-info/
+__pycache__/

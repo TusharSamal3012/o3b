@@ -25,6 +25,7 @@ modalities:
   - cam_tform4x4_obj       # GT pose
   - cam_tform4x4_obj_ncds  # task: maps obj_kpts3d (NCDS) → camera space
   - cam_bbox2d             # required by the CropCamBBox2D transform
+  - cam_bbox3d             # obj-space 3D box side lengths (drawn in qualit)
   - obj_kpts3d
   - obj_kpts3d_mask
   - category

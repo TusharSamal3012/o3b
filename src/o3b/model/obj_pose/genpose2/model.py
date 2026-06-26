@@ -16,6 +16,7 @@ without an axis swap.  The NCDS cube follows the dataset convention
 from __future__ import annotations
 
 import logging
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +55,8 @@ class GenPose2(OD3D_Model):
         tracking: bool = False,
         tracking_T0: float = 0.55,
         ckpt_url: Optional[str] = _DEFAULT_CKPT_URL,
+        cam_tform4x4_cam_raw: Optional[list] = None,
+        obj_tform4x4: Optional[list] = None,
     ):
         super().__init__()
         self.genpose2_fpath = Path(genpose2_fpath) if genpose2_fpath is not None else None
@@ -68,6 +71,17 @@ class GenPose2(OD3D_Model):
         self.tracking = tracking
         self.tracking_T0 = tracking_T0
         self._prev_pose = None
+        # Optional convention transform applied to the predicted pose to match the
+        # dataset's cam_tform4x4_obj convention:
+        #   cam_tform4x4_obj = cam_tform4x4_cam_raw @ pred @ obj_tform4x4
+        self.cam_tform4x4_cam_raw = (
+            torch.tensor(cam_tform4x4_cam_raw, dtype=torch.float32)
+            if cam_tform4x4_cam_raw is not None else None
+        )
+        self.obj_tform4x4 = (
+            torch.tensor(obj_tform4x4, dtype=torch.float32)
+            if obj_tform4x4 is not None else None
+        )
 
         self.genpose2 = None
         if self.genpose2_fpath is not None:
@@ -162,6 +176,9 @@ class GenPose2(OD3D_Model):
         from genpose2.runners.infer import InferDataset
 
         device, dtype = cam_intr4x4.device, cam_intr4x4.dtype
+        # GenPose2's networks live on cfg.device (typically cuda); InferDataset must
+        # build its tensors on that same device, regardless of the input's device.
+        gp2_device = getattr(self.genpose2.cfg, "device", "cuda")
         height, width = rgb.shape[-2:]
         fx = cam_intr4x4[0, 0].cpu().numpy()
         fy = cam_intr4x4[1, 1].cpu().numpy()
@@ -193,7 +210,7 @@ class GenPose2(OD3D_Model):
                 }}},
             },
             img_size=self.img_size,
-            device=device,
+            device=gp2_device,
             n_pts=self.n_pts,
         )
 
@@ -208,10 +225,37 @@ class GenPose2(OD3D_Model):
             cam_tform4x4_obj[:3, 3] = cam_tform4x4_obj[:3, 3] / scale_depth
             size3d = size3d / scale_depth
         except Exception:
-            logger.warning("genpose2 inference failed; returning fallback pose.")
+            import numpy as np
+            _m = _mask.cpu().numpy()
+            logger.warning(
+                "genpose2 inference failed; returning fallback pose. Inputs → "
+                f"color: shape={tuple(rgb.shape)} dtype={rgb.dtype} "
+                f"range=[{rgb.min().item():.3g},{rgb.max().item():.3g}]; "
+                f"depth: shape={tuple(_depth.shape)} dtype={_depth.dtype} "
+                f"range=[{_depth.min().item():.3g},{_depth.max().item():.3g}] "
+                f"n_valid(0<d<=max)={int(((_depth>0)&(_depth<=self.depth_max)).sum())}; "
+                f"mask: shape={_m.shape} dtype={_m.dtype} unique={np.unique(_m)[:8]} "
+                f"n_obj_px={int((_m==1).sum())}; "
+                f"intr: fx={fx} fy={fy} cx={cx} cy={cy} w={width} h={height}; "
+                f"scale_depth={float(scale_depth):.4g}",
+            )
+            logger.warning("traceback:\n" + traceback.format_exc())
             cam_tform4x4_obj = torch.eye(4, dtype=dtype, device=device)
             cam_tform4x4_obj[2, 3] = 100.0
             size3d = torch.ones(3, dtype=dtype, device=device)
+
+        
+
+        # Re-express the predicted pose in the dataset's cam_tform4x4_obj convention:
+        #   cam_tform4x4_cam_raw @ pred @ obj_tform4x4
+        if self.cam_tform4x4_cam_raw is not None:
+            cam_tform4x4_obj = self.cam_tform4x4_cam_raw.to(dtype=dtype, device=device) @ cam_tform4x4_obj
+        if self.obj_tform4x4 is not None:
+            T = self.obj_tform4x4.to(dtype=dtype, device=device)
+            cam_tform4x4_obj = cam_tform4x4_obj @ T
+            # obj_tform4x4 permutes the object axes → permute the per-axis size3d
+            # to match (|R| is a permutation matrix for an axis-swap transform).
+            size3d = (T[:3, :3].abs() @ size3d.reshape(3, 1)).reshape(-1)
 
         return cam_tform4x4_obj, size3d
 

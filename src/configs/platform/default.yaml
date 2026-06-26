@@ -20,7 +20,7 @@ torch_version: "2.6.0"
 deps:
   # - diff3f
   # - densematcher
-  # - genpose2
+  #- genpose2
 
 url_repo: https://${.credentials.github.token}@github.com/GenIntel/od3d.git
 

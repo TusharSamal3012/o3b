@@ -12,9 +12,10 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     from torch.utils.data import DataLoader
     from omegaconf import OmegaConf
 
-    from o3b.dataset.dataset import DatasetConfig, build_dataset
+    from o3b.dataset.dataset import DatasetConfig, build_dataset, ItemType
     from o3b.task.task import build_task
     from o3b.data.datatypes.object import collate_object_pairs
+    from o3b.data.datatypes.frame_object import collate_frame_object_pairs
 
     dataset_cfg = DatasetConfig.from_dict(run_raw["dataset"])
     dataset     = build_dataset(dataset_cfg)
@@ -23,10 +24,13 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     eval_cfg   = run_raw.get("eval") or {}
     batch_size = eval_cfg.get("batch_size", 4)
 
+    collate_fn = (collate_frame_object_pairs
+                  if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
+                  else collate_object_pairs)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        collate_fn=collate_object_pairs,
+        collate_fn=collate_fn,
         shuffle=False,
         num_workers=0,
     )

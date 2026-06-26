@@ -1431,10 +1431,7 @@ def proj3d2d(pts3d, proj4x4):
         dtype=dtype,
     )
     pts4d = torch.concatenate([pts3d, ones1d], dim=-1)
-    print(pts4d.shape)
     pts4d = pts4d.reshape(list(pts4d.shape) + [1])
-    print(pts4d.shape)
-    print(proj4x4.shape)
     pts4d_transf = torch.bmm(
         proj4x4.reshape(-1, 4, 4),
         pts4d.reshape(-1, 4, 1),

@@ -251,6 +251,106 @@ class FrameObjectBatch:
     mesh:                    Optional[Mesh]   = None  # shared mesh for all B viewpoints
 
 
+@dataclass(kw_only=True)
+class FrameObjectPair:
+    """A query (src) + target (trgt) pair of FrameObjects of the same category."""
+    src_object:     FrameObject
+    trgt_object:    FrameObject
+    src_object_id:  Optional[str] = None
+    trgt_object_id: Optional[str] = None
+
+
+@dataclass
+class FrameObjectPairBatch:
+    """Stacked across B FrameObjectPair samples (src = query, trgt = target)."""
+    # ── keypoints (NCDS object space) ─────────────────────────────────────────
+    src_obj_kpts3d:       Optional[Tensor] = None  # (B, K, 3)
+    trgt_obj_kpts3d:      Optional[Tensor] = None  # (B, K, 3)
+    src_obj_kpts3d_mask:  Optional[Tensor] = None  # (B, K) bool
+    trgt_obj_kpts3d_mask: Optional[Tensor] = None  # (B, K) bool
+    # ── ground-truth poses ────────────────────────────────────────────────────
+    src_cam_tform4x4_obj:       Optional[Tensor] = None  # (B, 4, 4) cam←obj (metric)
+    trgt_cam_tform4x4_obj:      Optional[Tensor] = None  # (B, 4, 4)
+    src_cam_tform4x4_obj_ncds:  Optional[Tensor] = None  # (B, 4, 4) ncds→cam
+    trgt_cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (B, 4, 4)
+    src_obj_size:               Optional[Tensor] = None  # (B,) metric max bbox extent
+    trgt_obj_size:              Optional[Tensor] = None  # (B,)
+    # ── predicted poses (filled by a pose-estimation method; None → use GT) ────
+    src_pred_cam_tform4x4_obj:  Optional[Tensor] = None  # (B, 4, 4)
+    trgt_pred_cam_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
+    src_pred_obj_size3d:        Optional[Tensor] = None  # (B, 3) predicted side lengths
+    trgt_pred_obj_size3d:       Optional[Tensor] = None  # (B, 3)
+    # ── frame inputs (stacked tensors, or per-sample lists if sizes differ) ────
+    src_cam_intr4x4:  Optional[Tensor] = None  # (B, 4, 4)
+    trgt_cam_intr4x4: Optional[Tensor] = None
+    src_rgb:          Optional[object] = None  # (B, 3, H, W)
+    trgt_rgb:         Optional[object] = None
+    src_depth:        Optional[object] = None  # (B, H, W)
+    trgt_depth:       Optional[object] = None
+    src_depth_mask:   Optional[object] = None  # (B, H, W) bool
+    trgt_depth_mask:  Optional[object] = None
+    src_fo_mask:      Optional[object] = None  # (B, H, W) bool object instance mask
+    trgt_fo_mask:     Optional[object] = None
+    # ── per-sample meshes (for qualitative rendering) + category ───────────────
+    src_meshes:   Optional[list]   = None  # list of B Mesh
+    trgt_meshes:  Optional[list]   = None  # list of B Mesh
+    src_category: Optional[Tensor] = None  # (B,) int64
+    trgt_category: Optional[Tensor] = None  # (B,) int64
+    # 3-D bounding-box side lengths (obj space) for draw_bbox3d
+    src_cam_bbox3d:  Optional[Tensor] = None  # (B, 3)
+    trgt_cam_bbox3d: Optional[Tensor] = None  # (B, 3)
+
+
+def collate_frame_object_pairs(
+    samples: list[FrameObjectPair],
+    include: Optional[set[str]] = None,
+) -> FrameObjectPairBatch:
+    def _get(attr, side):
+        return _stack_field([getattr(getattr(s, f"{side}_object"), attr, None) for s in samples])
+
+    def _scalar(attr, side):
+        return _stack_field([
+            torch.as_tensor(getattr(getattr(s, f"{side}_object"), attr), dtype=torch.float32)
+            if getattr(getattr(s, f"{side}_object"), attr, None) is not None else None
+            for s in samples
+        ])
+
+    def _stack_or_list(attr, side):
+        vals = [getattr(getattr(s, f"{side}_object"), attr, None) for s in samples]
+        if any(v is None for v in vals):
+            return None
+        return (torch.stack(vals, dim=0)
+                if len({tuple(v.shape) for v in vals}) == 1 else vals)
+
+    def _meshes(side):
+        ms = [getattr(getattr(s, f"{side}_object"), "mesh", None) for s in samples]
+        return ms if any(m is not None for m in ms) else None
+
+    def _cat(side):
+        return _stack_field([
+            torch.tensor(getattr(getattr(s, f"{side}_object"), "category_id"))
+            if getattr(getattr(s, f"{side}_object"), "category_id", None) is not None else None
+            for s in samples
+        ])
+
+    out = FrameObjectPairBatch()
+    for side in ("src", "trgt"):
+        setattr(out, f"{side}_obj_kpts3d",            _get("obj_kpts3d", side))
+        setattr(out, f"{side}_obj_kpts3d_mask",       _get("obj_kpts3d_mask", side))
+        setattr(out, f"{side}_cam_tform4x4_obj",      _get("cam_tform4x4_obj", side))
+        setattr(out, f"{side}_cam_tform4x4_obj_ncds", _get("cam_tform4x4_obj_ncds", side))
+        setattr(out, f"{side}_obj_size",              _scalar("obj_size", side))
+        setattr(out, f"{side}_cam_intr4x4",           _get("cam_intr4x4", side))
+        setattr(out, f"{side}_rgb",                   _stack_or_list("rgb", side))
+        setattr(out, f"{side}_depth",                 _stack_or_list("depth", side))
+        setattr(out, f"{side}_depth_mask",            _stack_or_list("depth_mask", side))
+        setattr(out, f"{side}_fo_mask",               _stack_or_list("fo_mask", side))
+        setattr(out, f"{side}_meshes",                _meshes(side))
+        setattr(out, f"{side}_category",              _cat(side))
+        setattr(out, f"{side}_cam_bbox3d",            _get("cam_bbox3d", side))
+    return out
+
+
 def collate_frame_objects(
     samples: list[FrameObject],
     include: Optional[set[str]] = None,

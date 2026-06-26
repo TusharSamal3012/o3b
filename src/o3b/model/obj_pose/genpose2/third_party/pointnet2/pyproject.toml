@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm", "wheel", "torch"] # problem: torch with different cuda version etc.
+
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]  # "third_party/TRELLIS"
+# namespaces = false
+# include = ["od3d*", "trellis*"]  # alternatively: `exclude = ["additional*"]`
+# third_party/mip-splatting/submodules/diff-gaussian-rasterization
+
+#[tool.setuptools.package-dir]
+#od3d = "src/od3d"
+#trellis = "third_party/TRELLIS/trellis"
+#diff-gaussian-rasterization = "third_party/mip-splatting/submodules/diff-gaussian-rasterization"
+
+[project]
+name = "PointNet2"
+authors = [
+    {name = "Leonhard Sommer", email = "sommerl@cs.uni-freiburg.de"},
+]
+description = "Neural Mesh, Render and Compare"
+readme = "README.md"
+requires-python = ">=3.7"
+keywords = ["3D", "detection", "object"]
+license = {text = "BSD-3-Clause"}
+dynamic = ["version"]
+
+#[tool.setuptools]
+#packages = { find = {} }
+
+
+#[tool.setuptools]
+#packages = []
+
+#[tool.setuptools.packages.find]
+#where = ["src", "third_party/TRELLIS"]
+
+dependencies = [
+    "setuptools>=42",
+    "torch",
+    "wheel",
+]

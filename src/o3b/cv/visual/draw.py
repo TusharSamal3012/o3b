@@ -238,16 +238,16 @@ def draw_gradient_line(img, p0, p1, c0, c1, steps=10, thickness=2):
 
 
 
-def batch_draw_bbox3d(imgs, objs_size3d, cams_intr4x4, cams_tform4x4_obj, cams_scale1d=None, down_sample_rate=None, thickness=2):
+def batch_draw_bbox3d(imgs, objs_size3d, cams_intr4x4, cams_tform4x4_obj, cams_scale1d=None, down_sample_rate=None, thickness=2, opengl=True):
     B = len(imgs)
     for b in range(B):
-        imgs[b] = draw_bbox3d(img=imgs[b], obj_size3d=objs_size3d[b], 
-                              cam_intr4x4=cams_intr4x4[b], cam_tform4x4_obj=cams_tform4x4_obj[b], 
-                              cam_scale1d=cams_scale1d[b] if cams_scale1d is not None else None, 
-                              down_sample_rate=down_sample_rate, thickness=thickness)
+        imgs[b] = draw_bbox3d(img=imgs[b], obj_size3d=objs_size3d[b],
+                              cam_intr4x4=cams_intr4x4[b], cam_tform4x4_obj=cams_tform4x4_obj[b],
+                              cam_scale1d=cams_scale1d[b] if cams_scale1d is not None else None,
+                              down_sample_rate=down_sample_rate, thickness=thickness, opengl=opengl)
     return imgs
 
-def draw_bbox3d(img, obj_size3d, cam_intr4x4, cam_tform4x4_obj, cam_scale1d=None, down_sample_rate=None, thickness=2):
+def draw_bbox3d(img, obj_size3d, cam_intr4x4, cam_tform4x4_obj, cam_scale1d=None, down_sample_rate=None, thickness=2, opengl=True):
     from o3b.cv.visual.blend import rgb_to_range01
     from o3b.cv.geometry.transform import proj3d2d_broadcast, tform4x4_broadcast, cam_intr4x4_downsample
     from o3b.cv.geometry.transform import depth2pts3d_grid, transf3d_broadcast, inv_tform4x4, get_a_tform4x4_b_scale1d_transl_only, get_a_tform4x4_b_scale1d_rot_and_transl
@@ -261,6 +261,12 @@ def draw_bbox3d(img, obj_size3d, cam_intr4x4, cam_tform4x4_obj, cam_scale1d=None
     
     if down_sample_rate is not None:
         cam_intr4x4, _ = cam_intr4x4_downsample(cams_intr4x4=cam_intr4x4.clone(), down_sample_rate=down_sample_rate)
+    if opengl:
+        # OpenGL camera convention (-Z forward, -Y up): flip the intrinsics' y,z
+        # axes, matching proj3d2d_tform4x4_intr4x4_broadcast used for keypoints.
+        cam_intr4x4 = cam_intr4x4.clone()
+        cam_intr4x4[..., :, 1] = -cam_intr4x4[..., :, 1]
+        cam_intr4x4[..., :, 2] = -cam_intr4x4[..., :, 2]
     cam_proj4x4_obj = tform4x4_broadcast(cam_intr4x4, cam_tform4x4_obj)
 
     bbox3d_verts_proj2d = proj3d2d_broadcast(pts3d=bbox3d.verts, proj4x4=cam_proj4x4_obj)

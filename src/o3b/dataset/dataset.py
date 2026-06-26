@@ -252,13 +252,13 @@ class ConfigurableDataset(_TorchDataset):
 
     def _item_type_cls(self):
         from o3b.data.modalities import (  # noqa: F401
-            FrameObject, SceneObject, Object, ObjectPair,
+            FrameObject, SceneObject, Object, ObjectPair, FrameObjectPair,
         )
         return {
             ItemType.OBJECT: Object,
             ItemType.OBJECT_PAIR: ObjectPair,
             ItemType.FRAME_OBJECT: FrameObject,
-            ItemType.FRAME_OBJECT_PAIR: ObjectPair,
+            ItemType.FRAME_OBJECT_PAIR: FrameObjectPair,
             ItemType.SCENE_OBJECT: SceneObject,
         }[self.cfg.item_type]
 
@@ -345,7 +345,8 @@ class ConfigurableDataset(_TorchDataset):
             item = self._load_item(idx)
         if self._transform is not None and item is not None:
             from o3b.data.datatypes.object import ObjectPair
-            if isinstance(item, ObjectPair):
+            from o3b.data.datatypes.frame_object import FrameObjectPair
+            if isinstance(item, (ObjectPair, FrameObjectPair)):
                 # per-frame transforms (e.g. CropCamBBox2D) apply to each side
                 from dataclasses import replace as _replace
                 item = _replace(

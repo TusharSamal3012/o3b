@@ -793,12 +793,13 @@ class HouseCorr3D(ConfigurableDataset):
         """
         return self._load_frame_object_by_rowidx(self._frame_rows_id[idx])
 
-    def _load_frame_object_pair(self, idx: int) -> ObjectPair:
+    def _load_frame_object_pair(self, idx: int) -> "FrameObjectPair":
         """Load a frame-object pair: query (src) and target (trgt) FrameObjects."""
+        from o3b.data.datatypes.frame_object import FrameObjectPair
         src_rowidx, trgt_rowidx = self._frame_pairs_id[idx]
         src_fo  = self._load_frame_object_by_rowidx(src_rowidx)
         trgt_fo = self._load_frame_object_by_rowidx(trgt_rowidx)
-        return ObjectPair(
+        return FrameObjectPair(
             src_object_id  = src_fo.object_id,
             trgt_object_id = trgt_fo.object_id,
             src_object     = src_fo,
@@ -831,10 +832,6 @@ class HouseCorr3D(ConfigurableDataset):
         cam_tform4x4_obj_raw = (torch.tensor(json.loads(row["cam_tform4x4_obj"]), dtype=torch.float32)
                                 if row.get("cam_tform4x4_obj") else None)
         
-        #if cam_tform4x4_obj_raw is not None and self.cfg.obj_tform4x4 is not None:
-        #    T_inv = torch.linalg.inv(torch.tensor(self.cfg.obj_tform4x4, dtype=torch.float32))
-        #    cam_tform4x4_obj_raw = cam_tform4x4_obj_raw @ T_inv
-        
         if cam_tform4x4_obj_raw is not None and self.cfg.cam_tform4x4_cam_raw is not None:
             C = torch.tensor(self.cfg.cam_tform4x4_cam_raw, dtype=torch.float32)
             cam_tform4x4_obj_raw = C @ cam_tform4x4_obj_raw
@@ -845,6 +842,11 @@ class HouseCorr3D(ConfigurableDataset):
             cam_bbox2d = get_bboxs_from_masks(mask[None])[0].float()
         cam_bbox3d = (torch.tensor(json.loads(row["obj_size3d"]), dtype=torch.float32)
                       if _want("cam_bbox3d", mods) and row.get("obj_size3d") else None)
+        # obj_tform4x4 permutes the object axes (applied to mesh/kpts/ncds in
+        # _load_object_from_row) → permute the per-axis box side lengths to match.
+        if cam_bbox3d is not None and self.cfg.obj_tform4x4 is not None:
+            R = torch.tensor(self.cfg.obj_tform4x4, dtype=torch.float32)[:3, :3].abs()
+            cam_bbox3d = (R @ cam_bbox3d.reshape(3, 1)).reshape(-1)
 
         # Build metric cam_tform4x4_obj: SVD-normalise rotation, embed obj_scale.
         # Robust to whether the stored matrix has scale embedded or not.
