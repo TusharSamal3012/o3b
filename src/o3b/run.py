@@ -34,6 +34,23 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     task_cfg = OmegaConf.create(run_raw["task"])
     task     = build_task(task_cfg)
     print(f"Task:    {run_raw['task']['class_name']}")
+
+    # ── method (optional) ─────────────────────────────────────────────────────
+    # The method runs on each batch before the task (e.g. a pose estimator that
+    # writes predicted poses). If it cannot be built (e.g. missing dependency)
+    # we warn and fall back to the task on the raw batch (GT/oracle).
+    method = None
+    method_cfg = run_raw.get("method")
+    if method_cfg:
+        cls_name = method_cfg.get("class_name")
+        try:
+            from housecorr3dv2.method.method import build_method, MethodConfig
+            method = build_method(MethodConfig.from_dict(dict(method_cfg)))
+            print(f"Method:  {cls_name}")
+        except Exception as exc:
+            print(f"WARNING: could not build method {cls_name!r} ({exc}); "
+                  f"running task on raw batch (GT/oracle).")
+
     print(f"Eval:    batch_size={batch_size}  n_batches={len(loader)}\n")
 
     # ── wandb init ────────────────────────────────────────────────────────────
@@ -59,6 +76,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     qualit_log_batches = eval_cfg.get("qualit_log_batches", 8)
 
     for batch_idx, batch in enumerate(loader):
+        if method is not None:
+            batch = method(batch)
         quant, qualit = task(batch)
 
         B = (batch.src_obj_kpts3d.shape[0]

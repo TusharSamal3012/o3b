@@ -441,9 +441,22 @@ def _add_frame_object_to_scene(
     handles.extend(_add_axes_to_scene(server, f"{prefix}/camera/axes", world_tform4x4_cam,
                                       axes_length=0.12, axes_radius=0.005))
 
-    if fo.mesh is not None and fo.cam_tform4x4_obj_ncds is not None:
-        fo_world = fo.transform(fo.cam_tform4x4_obj_ncds)
+    # Transform the object into camera space once; mesh and keypoints both use it
+    # (placed via position=pos), so they can never drift relative to each other.
+    fo_world = (fo.transform(fo.cam_tform4x4_obj_ncds)
+                if fo.cam_tform4x4_obj_ncds is not None else None)
+
+    if fo.mesh is not None and fo_world is not None:
         hs = fo_world._build_scene_handles(server, f"{prefix}/object", pos)
+        # _build_scene_handles already adds a default kpts3d node at position=pos;
+        # drop it so the index-colored spheres below are not double-offset by a
+        # stale node that retains `pos`.
+        kpts_default = hs.pop("kpts3d", None)
+        if kpts_default is not None:
+            try:
+                kpts_default.remove()
+            except Exception:
+                pass
         handles.extend(h for h in hs.values() if h is not None)
 
     if fo.cam_tform4x4_obj_ncds is not None:
@@ -472,25 +485,26 @@ def _add_frame_object_to_scene(
             if h is not None:
                 handles.append(h)
 
-    # 3-D keypoint spheres (colored by index → correspondence across the pair)
-    if fo.obj_kpts3d is not None and fo.cam_tform4x4_obj_ncds is not None:
-        K = fo.obj_kpts3d.shape[0]
-        kpts_h = torch.cat([fo.obj_kpts3d.float(), torch.ones(K, 1)], dim=-1)  # (K, 4)
-        kpts_world = (offset @ fo.cam_tform4x4_obj_ncds.float() @ kpts_h.T).T[:, :3]
-        if fo.obj_kpts3d_mask is not None:
-            keep = fo.obj_kpts3d_mask.cpu().bool().numpy()
+    # 3-D keypoint spheres — placed exactly like the mesh: cam-space coords from
+    # fo_world at position=pos (NOT baked into the coordinates), index-colored so
+    # the same color marks corresponding keypoints across the pair.
+    if fo_world is not None and fo_world.obj_kpts3d is not None:
+        kpts_cam = fo_world.obj_kpts3d.float().cpu().numpy()
+        K = kpts_cam.shape[0]
+        if fo_world.obj_kpts3d_mask is not None:
+            keep = fo_world.obj_kpts3d_mask.cpu().bool().numpy()
         else:
             keep = np.ones(K, dtype=bool)
         if kpt_colors is None:
             kpt_colors = _kpts_index_colors(K)
-        pts_np = kpts_world.cpu().numpy()[keep]
+        pts_np = kpts_cam[keep]
         cols_np = np.asarray(kpt_colors)[keep].astype(np.uint8)
         if pts_np.shape[0] > 0:
             try:
                 h = server.scene.add_point_cloud(
                     f"{prefix}/object/kpts3d",
                     points=pts_np, colors=cols_np, point_size=0.012,
-                    point_shape="circle",
+                    point_shape="circle", position=pos,
                 )
                 handles.append(h)
             except Exception:

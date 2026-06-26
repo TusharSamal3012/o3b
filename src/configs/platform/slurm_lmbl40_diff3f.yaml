@@ -20,5 +20,5 @@ ram_per_cpu: "24gb" #
 walltime: "24:00:00" #  "24:00:00"
 
 deps:
-  - diff3f     # available: densematcher, diff3f
+  - diff3f     # available: diff3f, densematcher, genpose2
   #                   # creates venv_py310_cu124_torch26_densematcher and installs deps there

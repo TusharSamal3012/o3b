@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools"] # , "setuptools-scm", "wheel", "torch"] # problem: torch with different cuda version etc.
+
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]  # "third_party/TRELLIS"
+# namespaces = false
+# include = ["od3d*", "trellis*"]  # alternatively: `exclude = ["additional*"]`
+# third_party/mip-splatting/submodules/diff-gaussian-rasterization
+
+#[tool.setuptools.package-dir]
+#od3d = "src/od3d"
+#trellis = "third_party/TRELLIS/trellis"
+#diff-gaussian-rasterization = "third_party/mip-splatting/submodules/diff-gaussian-rasterization"
+
+[project]
+name = "GenPose2"
+authors = [
+    {name = "Leonhard Sommer", email = "sommerl@cs.uni-freiburg.de"},
+]
+description = "Neural Mesh, Render and Compare"
+readme = "README.md"
+requires-python = ">=3.7"
+keywords = ["3D", "detection", "object"]
+license = {text = "BSD-3-Clause"}
+dynamic = ["version"]
+
+#[tool.setuptools]
+#packages = { find = {} }
+
+
+#[tool.setuptools]
+#packages = []
+
+#[tool.setuptools.packages.find]
+#where = ["src", "third_party/TRELLIS"]
+
+dependencies = [
+    "opencv-python", #==4.9.0.80",
+    "scipy", #==1.12.0",
+    "numpy", #==1.26.3",
+    "tensorboardX", #==2.6.2.2",
+    "tensorboard", #==2.17.0",
+    "open3d", #==0.18.0",
+    "pyrealsense2", #==2.55.1.6486",
+    "ipdb",
+    "matplotlib",
+    "tqdm",
+    "scikit-learn",
+    "sam2",
+    "holodex",
+    "cutoop",
+    #"setuptools>=42",
+    #"torch",
+    #"wheel",
+]

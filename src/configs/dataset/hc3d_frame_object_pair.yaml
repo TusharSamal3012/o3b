@@ -9,45 +9,36 @@
 #   o3b dataset viz   -d hc3d_frame_object_pair --object-centric
 
 defaults:
-  - hc3d
+  - hc3d_frame_object
   - _self_
-
-class_name: HouseCorr3D
-
-mesh_type: "mc16"
 
 item_type: frame_object_pair
 
-# split: "train" | "test" | "all"
-split: all
-
-# filter_is_real: null → all data  |  false → synthetic only  |  true → real only
-filter_is_real: false
-
+# Modalities needed by CamCrsp3DNNTask + GenPose2Method + the crop transform.
+# (overrides the hc3d_frame_object list, which lacks cam_tform4x4_obj_ncds).
 modalities:
-  - rgb
-  - fo_mask
-  #- depth
-  #- depth_mask
-  - cam_intr4x4
-  - cam_tform4x4_obj
-  - cam_tform4x4_obj_ncds
-  - cam_bbox2d
-  - cam_bbox3d
+  - rgb                    # GenPose2 input
+  - depth                  # GenPose2 input
+  - depth_mask             # GenPose2 input
+  - fo_mask                # GenPose2 input (object instance mask)
+  - cam_intr4x4            # crop transform + GenPose2
+  - cam_tform4x4_obj       # GT pose
+  - cam_tform4x4_obj_ncds  # task: maps obj_kpts3d (NCDS) → camera space
+  - cam_bbox2d             # required by the CropCamBBox2D transform
   - obj_kpts3d
   - obj_kpts3d_mask
-  - obj_kpts2d_mask
   - category
 
-filter_has_kpts: true
 filter_count_max: 50
 
+# viewpoints (frames) sampled per object instance when forming cross-instance
+# pairs (1 = a single representative frame per instance, -1 = all available frames)
+frame_pair_views_per_instance: -1
 
-transform:
-  class_name: CropCamBBox2D
-  H: 224 # 256
-  W: 224 # 256
-  # per-side crop margin as a fraction of bbox size (crop spans 1 + 2*bbox_overlap)
-  bbox_overlap: 0.15
+# how the two instances' viewpoints combine:
+#   aligned → view i of A with view i of B   (~n_views pairs per instance pair)
+#   cross   → every view of A with every view of B  (~n_views^2)
+frame_pair_view_mode: cross
 
 categories:
+  - toy_motorcycle

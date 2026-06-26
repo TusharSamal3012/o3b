@@ -147,7 +147,12 @@ class HouseCorr3D(ConfigurableDataset):
                 else:
                     real_clause2 = " AND data_type = 'synthetic'"
                 kpts_clause2  = " AND has_kpts = 1" if has_kpts else ""
-                limit_clause2 = f" LIMIT {limit}" if limit else ""
+                # In pair mode filter_count_max caps the number of *pairs* (applied in
+                # _build_frame_pairs), so the full frame pool must stay available here.
+                limit_clause2 = (
+                    f" LIMIT {limit}"
+                    if limit and self.cfg.item_type == ItemType.FRAME_OBJECT else ""
+                )
 
                 if cats2:
                     placeholders2 = ", ".join("?" * len(cats2))
@@ -170,22 +175,63 @@ class HouseCorr3D(ConfigurableDataset):
                 self._frame_pairs_id = self._build_frame_pairs()
 
     def _build_frame_pairs(self) -> list[tuple[int, int]]:
-        """Pair filtered frame rows within each category (sliding consecutive pairs).
+        """Build cross-instance frame pairs within each category.
 
-        Each pair (i, j) references two indices into self._frame_rows; a query
-        frame is paired with the next frame of the same category, requiring a
-        different object instance so the correspondence is non-trivial.
+        Frames are grouped by category, then by object instance (object_id).  Up
+        to ``frame_pair_views_per_instance`` evenly-spaced viewpoints are sampled
+        per instance (-1 = all available frames), and each instance is paired with
+        every *other* distinct instance of the same category as ordered (query,
+        target) pairs.  This is independent of row ordering — unlike adjacent
+        pairing it does not collapse when a category has long same-instance runs
+        in frames.db.
+
+        ``frame_pair_view_mode`` selects how the two instances' viewpoints combine:
+          "aligned" → view i of A with view i of B (~n_views pairs per instance pair)
+          "cross"   → every view of A with every view of B (~n_views^2)
+
+        Viewpoint-index combinations are emitted broad-coverage-first so that under
+        the filter_count_max cap every instance pair gets its earliest combinations
+        before any gets a later one.
         """
+        from itertools import permutations
+
+        views_cfg = self.cfg.frame_pair_views_per_instance
+        use_all   = views_cfg is not None and views_cfg < 0
+        n_views   = None if use_all else max(1, views_cfg)
+        cross     = self.cfg.frame_pair_view_mode == "cross"
+
+        def _sample_views(rids: list[int]) -> list[int]:
+            """Up to n_views evenly-spaced viewpoints (all of them when use_all)."""
+            if use_all or len(rids) <= n_views:
+                return rids
+            step = len(rids) / n_views
+            return [rids[int(i * step)] for i in range(n_views)]
+
+        def _view_combos(max_v: int) -> list[tuple[int, int]]:
+            """Viewpoint-index combinations, broad-coverage first."""
+            if cross:
+                return sorted(
+                    ((i, j) for i in range(max_v) for j in range(max_v)),
+                    key=lambda ij: (max(ij), ij[0], ij[1]),
+                )
+            return [(i, i) for i in range(max_v)]
+
+        # category -> { object_id -> [all frame row indices for that instance] }
         by_cat: dict = {}
         for rid in self._frame_rows_id:
-            cat = self._frame_rows[rid].get("category")
-            by_cat.setdefault(cat, []).append(rid)
+            row = self._frame_rows[rid]
+            by_cat.setdefault(row.get("category"), {}).setdefault(row.get("object_id"), []).append(rid)
 
         pairs: list[tuple[int, int]] = []
-        for rids in by_cat.values():
-            for a, b in zip(rids, rids[1:]):
-                if self._frame_rows[a].get("object_id") != self._frame_rows[b].get("object_id"):
-                    pairs.append((a, b))
+        for instances in by_cat.values():
+            views = {oid: _sample_views(rids) for oid, rids in instances.items()}
+            oids = list(views)
+            max_v = max((len(v) for v in views.values()), default=0)
+            for vi, vj in _view_combos(max_v):
+                for a_oid, b_oid in permutations(oids, 2):
+                    av, bv = views[a_oid], views[b_oid]
+                    if vi < len(av) and vj < len(bv):
+                        pairs.append((av[vi], bv[vj]))
 
         limit = self.cfg.filter_count_max
         if limit:

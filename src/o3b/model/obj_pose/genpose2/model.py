@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 # NCDS cube max extent (dataset convention: obj_size_ncds == 2.0).
 _OBJ_SIZE_NCDS = 2.0
 
+# Default checkpoint download (zip with ScoreNet/EnergyNet/ScaleNet *.pth).
+# NOTE: this is a *signed* Dropbox URL and will eventually expire; pass
+# ``ckpt_url`` to override it, or place the checkpoints under genpose2_fpath.
+_DEFAULT_CKPT_URL = (
+    "https://ucfad7d821ef9bcc92e64f8f3c85.dl.dropboxusercontent.com/zip_download_get/"
+    "Cmj0-h7_g5zBWMvGABE35k_Z3GzigWOkPelvtAAPMTtQ15S8X7AJ5W4E0Mbd7AreaQN5_YlDTVL1nHBzdlVOOdIaf8igTSmA1ZXoT9lxkBbJ-w"
+    "?_download_id=727486970084019193448685378584681882790785785253308828416779983372"
+    "&_log_download_success=1&_notify_domain=www.dropbox.com&dl=1"
+)
+
 
 @register_model("GenPose2")
 class GenPose2(OD3D_Model):
@@ -43,12 +53,14 @@ class GenPose2(OD3D_Model):
         depth_normalize: bool = True,
         tracking: bool = False,
         tracking_T0: float = 0.55,
+        ckpt_url: Optional[str] = _DEFAULT_CKPT_URL,
     ):
         super().__init__()
         self.genpose2_fpath = Path(genpose2_fpath) if genpose2_fpath is not None else None
         self.score_model_fname = score_model_fname
         self.energy_model_fname = energy_model_fname
         self.scale_model_fname = scale_model_fname
+        self.ckpt_url = ckpt_url
         self.img_size = img_size
         self.n_pts = n_pts
         self.depth_max = depth_max
@@ -61,8 +73,56 @@ class GenPose2(OD3D_Model):
         if self.genpose2_fpath is not None:
             self._init_genpose2()
 
+    def _ckpt_paths(self) -> list[Path]:
+        return [
+            self.genpose2_fpath / self.score_model_fname,
+            self.genpose2_fpath / self.energy_model_fname,
+            self.genpose2_fpath / self.scale_model_fname,
+        ]
+
+    def _ensure_checkpoints(self) -> None:
+        """Download + extract the checkpoints into genpose2_fpath if any are missing."""
+        if all(p.exists() for p in self._ckpt_paths()):
+            return
+        if not self.ckpt_url:
+            missing = [str(p) for p in self._ckpt_paths() if not p.exists()]
+            raise FileNotFoundError(
+                f"GenPose2 checkpoints missing and no ckpt_url set: {missing}",
+            )
+
+        import tempfile, urllib.request, zipfile
+
+        self.genpose2_fpath.mkdir(parents=True, exist_ok=True)
+        logger.info(f"GenPose2 checkpoints missing → downloading to {self.genpose2_fpath}")
+
+        def _progress(block_num, block_size, total_size):
+            if total_size > 0:
+                pct = min(block_num * block_size / total_size * 100, 100)
+                print(f"\r  [{'#' * int(pct // 2):<50}] {pct:5.1f}%", end="", flush=True)
+
+        with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            urllib.request.urlretrieve(self.ckpt_url, tmp_path, _progress)
+            print()
+            with zipfile.ZipFile(tmp_path) as zf:
+                # skip the leading "/" / absolute-path entry in the archive
+                members = [m for m in zf.namelist() if m not in ("/", "")]
+                zf.extractall(self.genpose2_fpath, members=members)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        still_missing = [str(p) for p in self._ckpt_paths() if not p.exists()]
+        if still_missing:
+            raise FileNotFoundError(
+                f"GenPose2 checkpoints still missing after download (URL may have "
+                f"expired — pass a fresh ckpt_url): {still_missing}",
+            )
+
     def _init_genpose2(self) -> None:
         import sys
+
+        self._ensure_checkpoints()
 
         # GenPose2's get_config() parses sys.argv; mirror the args used in od3d.
         sys.argv = [

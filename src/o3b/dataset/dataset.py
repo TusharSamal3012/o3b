@@ -61,6 +61,14 @@ class DatasetConfig:
     subsets:           Optional[list[str]]   = None   # None = all; e.g. ["train"] or ["train","val"]
     filter_count_max:  Optional[int]         = None   # None = all; max number of samples to load
     filter_has_kpts:   bool                  = False
+    # frame_object_pair: how many viewpoints (frames) to sample per object instance
+    # when forming cross-instance pairs (1 = one representative frame per instance,
+    # -1 = use all available frames of each instance)
+    frame_pair_views_per_instance: int       = 1
+    # how to combine the sampled viewpoints of two instances:
+    #   "aligned" → index-aligned (view i of A with view i of B), ~n_views pairs
+    #   "cross"   → full cross-product (every view of A with every view of B), ~n_views^2
+    frame_pair_view_mode: str                = "aligned"
     filter_is_real:    Optional[bool]        = None   # None = all, True = real only, False = synthetic only
     filter_score_zero: bool                  = False  # OpenTT: drop clips where both scores == 0
     # dataset-wide rigid transform applied to every loaded object (4x4, R|t convention)
@@ -99,6 +107,8 @@ class DatasetConfig:
             "subsets":           self.subsets,
             "filter_count_max":  self.filter_count_max,
             "filter_has_kpts":    self.filter_has_kpts,
+            "frame_pair_views_per_instance": self.frame_pair_views_per_instance,
+            "frame_pair_view_mode":          self.frame_pair_view_mode,
             "filter_is_real":     self.filter_is_real,
             "filter_score_zero":  self.filter_score_zero,
             "obj_tform4x4":         self.obj_tform4x4,
@@ -128,6 +138,8 @@ class DatasetConfig:
             subsets          = d.get("subsets"),
             filter_count_max = d.get("filter_count_max") or d.get("max_samples"),
             filter_has_kpts   = bool(d.get("filter_has_kpts",   False)),
+            frame_pair_views_per_instance = int(d.get("frame_pair_views_per_instance", 1)),
+            frame_pair_view_mode = d.get("frame_pair_view_mode", "aligned"),
             filter_is_real    = None if "filter_is_real" not in d or d["filter_is_real"] is None
                                  else bool(d["filter_is_real"]),
             filter_score_zero = bool(d.get("filter_score_zero", False)),
@@ -332,7 +344,17 @@ class ConfigurableDataset(_TorchDataset):
         else:
             item = self._load_item(idx)
         if self._transform is not None and item is not None:
-            item = self._transform(item)
+            from o3b.data.datatypes.object import ObjectPair
+            if isinstance(item, ObjectPair):
+                # per-frame transforms (e.g. CropCamBBox2D) apply to each side
+                from dataclasses import replace as _replace
+                item = _replace(
+                    item,
+                    src_object=self._transform(item.src_object),
+                    trgt_object=self._transform(item.trgt_object),
+                )
+            else:
+                item = self._transform(item)
         return item
 
     # ── Collation ─────────────────────────────────────────────────────────────

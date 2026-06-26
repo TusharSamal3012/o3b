@@ -387,10 +387,8 @@ def _run_platform_setup(args):
     print(OmegaConf.to_yaml(cfg))
 
     ssh_host = cfg.get("ssh")
-    if not ssh_host or ssh_host is False:
-        raise ValueError(
-            f"Platform '{platform}' has no ssh host configured (ssh: {ssh_host!r})"
-        )
+    # ssh: False (or unset) → run the setup script locally instead of over SSH/SLURM.
+    local_setup = (not ssh_host) or ssh_host is False
 
     path_ws        = cfg.get("path_ws", "")
     path_cuda      = cfg.get("path_cuda", "/usr/local/cuda-12.4")
@@ -398,8 +396,9 @@ def _run_platform_setup(args):
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
     deps                 = list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
-    install_diff3f       = cfg.get("install_diff3f", False) or "diff3f" in deps
-    install_densematcher = cfg.get("install_densematcher", False) or "densematcher" in deps
+    install_diff3f       = "diff3f" in deps
+    install_densematcher = "densematcher" in deps
+    install_genpose2     = "genpose2" in deps
     branch         = cfg.get("branch", "main")
     pull           = cfg.get("pull", True)
     pull_submodules  = cfg.get("pull_submodules", True)
@@ -469,6 +468,7 @@ def _run_platform_setup(args):
         "TORCH_VERSION":   torch_version,
         "INSTALL_DIFF3F":        "true" if install_diff3f else "false",
         "INSTALL_DENSEMATCHER":  "true" if install_densematcher else "false",
+        "INSTALL_GENPOSE2":      "true" if install_genpose2 else "false",
         "DEPS_TAG":              deps_tag,
         "REPO_URL":        repo_url,   # housecorr3d HTTPS URL with token
         "REPO_NAME":       repo_name,  # derived from remote URL, e.g. HouseCorr3Dv2
@@ -482,6 +482,34 @@ def _run_platform_setup(args):
         "http_proxy":      _proxy,
         "https_proxy":     _proxy,
     }
+    # ── local setup (ssh: False) ──────────────────────────────────────────────
+    # Run the setup script in-place on the existing local repo + venv. No clone,
+    # no pull/submodule-update (so the working tree is left untouched), no SLURM.
+    if local_setup:
+        import os
+        local_root = Path(local_repo_root)
+        local_env = {
+            **env_vars,
+            "PATH_WS":         str(local_root.parent),  # REPO_PATH = PATH_WS/REPO_NAME
+            "REPO_NAME":       local_root.name,          #            = local_root
+            "REPO_URL":        "",                       # repo already present → skip clone
+            "PULL":            "false",                  # don't disturb the local working tree
+            "PULL_SUBMODULES": "false",
+            "HTTP_PROXY": "", "HTTPS_PROXY": "", "http_proxy": "", "https_proxy": "",
+        }
+        venv_path = local_root / "venv"
+        if venv_path.is_dir():
+            local_env["VENV_PATH"] = str(venv_path)      # reuse the existing venv
+        local_copy = _save_script_locally(f"setup_{repo_name}_script", setup_script_local.read_text())
+        print(f"Local setup (ssh: {ssh_host!r}) — running {setup_script_local} in {local_root}")
+        print(f"  saved locally: {local_copy}")
+        subprocess.run(
+            ["bash", str(setup_script_local)],
+            env={**os.environ, **local_env},
+            check=True,
+        )
+        return
+
     sbatch_script = _make_sbatch_script(
         cfg,
         job_name=f"setup_{repo_name}",
@@ -760,8 +788,9 @@ def _platform_srun_context(platform: str):
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
     deps                 = list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
-    install_diff3f       = "true" if (cfg.get("install_diff3f", False) or "diff3f" in deps) else "false"
-    install_densematcher = "true" if (cfg.get("install_densematcher", False) or "densematcher" in deps) else "false"
+    install_diff3f       = "true" if "diff3f" in deps else "false"
+    install_densematcher = "true" if "densematcher" in deps else "false"
+    install_genpose2     = "true" if "genpose2" in deps else "false"
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
@@ -826,6 +855,7 @@ def _platform_srun_context(platform: str):
         f",TORCH_VERSION={torch_version}"
         f",INSTALL_DIFF3F={install_diff3f}"
         f",INSTALL_DENSEMATCHER={install_densematcher}"
+        f",INSTALL_GENPOSE2={install_genpose2}"
         f",REPO_URL={repo_url}"
         f",REPO_NAME={repo_name}"
         f",SETUP={setup}"
@@ -1681,8 +1711,9 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
     deps                 = deps_override if deps_override is not None else list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
-    install_diff3f       = "true" if (cfg.get("install_diff3f", False) or "diff3f" in deps) else "false"
-    install_densematcher = "true" if (cfg.get("install_densematcher", False) or "densematcher" in deps) else "false"
+    install_diff3f       = "true" if "diff3f" in deps else "false"
+    install_densematcher = "true" if "densematcher" in deps else "false"
+    install_genpose2     = "true" if "genpose2" in deps else "false"
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
@@ -1726,6 +1757,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         "TORCH_VERSION":   torch_version,
         "INSTALL_DIFF3F":        install_diff3f,
         "INSTALL_DENSEMATCHER":  install_densematcher,
+        "INSTALL_GENPOSE2":      install_genpose2,
         "DEPS_TAG":              deps_tag,
         "REPO_URL":        repo_url,
         "REPO_NAME":       repo_name,

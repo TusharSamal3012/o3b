@@ -1,0 +1,30 @@
+class_name: GenPose2
+
+# Directory holding the GenPose2 checkpoints, laid out as
+#   <genpose2_fpath>/ScoreNet/scorenet.pth
+#   <genpose2_fpath>/EnergyNet/energynet.pth
+#   <genpose2_fpath>/ScaleNet/scalenet.pth
+# (relative to the repo root). Download from the GenPose2 release.
+genpose2_fpath: "checkpoints/genpose2"
+
+score_model_fname:  "ScoreNet/scorenet.pth"
+energy_model_fname: "EnergyNet/energynet.pth"
+scale_model_fname:  "ScaleNet/scalenet.pth"
+
+# RoI crop / point-cloud sampling for the GenPose2 input
+img_size: 224
+n_pts: 1024
+
+# Depth handling: drop points beyond depth_max metres; normalise depth by its
+# median before inference (translation/size are rescaled back afterwards).
+depth_max: 4.0
+depth_normalize: true
+
+# Tracking (use the previous frame's pose as init); off for independent frames.
+tracking: false
+tracking_T0: 0.55
+
+# If the checkpoints under genpose2_fpath are missing they are downloaded from
+# this zip URL and extracted there. NOTE: this is a *signed* Dropbox URL that
+# will eventually expire — replace it with a fresh one if the download fails.
+ckpt_url: "https://ucfad7d821ef9bcc92e64f8f3c85.dl.dropboxusercontent.com/zip_download_get/Cmj0-h7_g5zBWMvGABE35k_Z3GzigWOkPelvtAAPMTtQ15S8X7AJ5W4E0Mbd7AreaQN5_YlDTVL1nHBzdlVOOdIaf8igTSmA1ZXoT9lxkBbJ-w?_download_id=727486970084019193448685378584681882790785785253308828416779983372&_log_download_success=1&_notify_domain=www.dropbox.com&dl=1"
