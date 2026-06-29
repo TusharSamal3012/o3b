@@ -199,11 +199,17 @@ class GenPose2(OD3D_Model):
         # GenPose2 expects non-object pixels flagged as 255.
         _mask[_mask == 0] = 255
 
+        # InferDataset.rgb_transform divides the color by 255 (ImageNet norm), so
+        # it expects 0-255 input; our rgb is float [0,1] → scale up.
+        _color = rgb.float()
+        if _color.max() <= 1.5:
+            _color = _color * 255.0
+
         data = InferDataset(
             data={
                 "depth": _depth.cpu().numpy(),
                 "mask": _mask.cpu().numpy(),
-                "color": rgb.permute(1, 2, 0).cpu().numpy(),
+                "color": _color.permute(1, 2, 0).cpu().numpy(),
                 "meta": {"camera": {"intrinsics": {
                     "fx": fx, "fy": fy, "cx": cx, "cy": cy,
                     "width": width, "height": height,
