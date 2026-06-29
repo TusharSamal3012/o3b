@@ -28,18 +28,19 @@ modalities:
   - cam_bbox3d             # obj-space 3D box side lengths (drawn in qualit)
   - obj_kpts3d
   - obj_kpts3d_mask
+  - obj_kpts2d_mask         # occlusion-aware visibility (amodal = annotated but not visible)
   - category
-
-filter_count_max: 50
 
 # viewpoints (frames) sampled per object instance when forming cross-instance
 # pairs (1 = a single representative frame per instance, -1 = all available frames)
-frame_pair_views_per_instance: -1
+frame_pair_views_per_instance: 5 # per instance pair
+
+filter_count_max: 1000 # per category if categories is applied
 
 # how the two instances' viewpoints combine:
 #   aligned → view i of A with view i of B   (~n_views pairs per instance pair)
 #   cross   → every view of A with every view of B  (~n_views^2)
-frame_pair_view_mode: cross
+frame_pair_view_mode: aligned
 
-categories:
-  - toy_motorcycle
+#categories:
+#  - toy_motorcycle

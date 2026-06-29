@@ -50,7 +50,8 @@ def _to_uint8_img(rgb: torch.Tensor):
 
 # ── qualitative renderers ──────────────────────────────────────────────────────
 
-def _draw_corr_panels(left, right, left_uv, right_gt_uv, right_pred_uv, valid, correct):
+def _draw_corr_panels(left, right, left_uv, right_gt_uv, right_pred_uv, valid, correct,
+                      left_amodal=None, right_amodal=None):
     """Draw a query|target side-by-side panel (left/right are (H, W, 3) uint8):
     each query keypoint (left) linked to its predicted target location (right),
     GT target keypoints shown as hollow white rings.  Returns (3, H, Wl+Wr)."""
@@ -74,10 +75,15 @@ def _draw_corr_panels(left, right, left_uv, right_gt_uv, right_pred_uv, valid, c
         gx, gy = int(np.clip(right_gt_uv[k, 0], 0, Wr - 1)),   int(np.clip(right_gt_uv[k, 1], 0, H - 1))
         px, py = int(np.clip(right_pred_uv[k, 0], 0, Wr - 1)), int(np.clip(right_pred_uv[k, 1], 0, H - 1))
         gx += Wl; px += Wl
+        rb = max(1, r // 2)  # black centre dot marks an amodal (occluded) keypoint
         draw.line([(sx, sy), (px, py)], fill=col, width=1)               # query → predicted
-        draw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=col, outline=(0, 0, 0))
-        draw.ellipse([gx - r, gy - r, gx + r, gy + r], outline=(255, 255, 255), width=2)  # GT ring
-        draw.ellipse([px - r, py - r, px + r, py + r], fill=col, outline=(0, 0, 0))        # predicted
+        draw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=col, outline=(0, 0, 0))           # source
+        if left_amodal is not None and bool(left_amodal[k]):
+            draw.ellipse([sx - rb, sy - rb, sx + rb, sy + rb], fill=(0, 0, 0))
+        draw.ellipse([gx - r, gy - r, gx + r, gy + r], outline=(255, 255, 255), width=2)      # GT ring
+        if right_amodal is not None and bool(right_amodal[k]):
+            draw.ellipse([gx - rb, gy - rb, gx + rb, gy + rb], fill=(0, 0, 0))
+        draw.ellipse([px - r, py - r, px + r, py + r], fill=col, outline=(0, 0, 0))           # predicted
     arr = np.asarray(pil).astype(np.float32) / 255.0
     return torch.from_numpy(arr).permute(2, 0, 1)
 
@@ -112,7 +118,7 @@ def _topdown_camera(H=256, W=256):
 
 def _render_topdown_corr_img(
     src_mesh, trgt_mesh, src_kpts_ncds, trgt_gt_kpts_ncds, trgt_pred_kpts_ncds,
-    valid, correct, H=256, W=256,
+    valid, correct, H=256, W=256, src_amodal=None, trgt_amodal=None,
 ):
     """source|target objects rendered from a top-down camera, with source query
     keypoints linked to their predicted target locations.  Returns (3, H, 2W)
@@ -128,7 +134,8 @@ def _render_topdown_corr_img(
     src_uv  = _proj_opengl(src_kpts_ncds,       cam_t, cam_k)
     gt_uv   = _proj_opengl(trgt_gt_kpts_ncds,   cam_t, cam_k)
     pred_uv = _proj_opengl(trgt_pred_kpts_ncds, cam_t, cam_k)
-    return _draw_corr_panels(left, right, src_uv, gt_uv, pred_uv, valid, correct)
+    return _draw_corr_panels(left, right, src_uv, gt_uv, pred_uv, valid, correct,
+                             left_amodal=src_amodal, right_amodal=trgt_amodal)
 
 
 # ── task ───────────────────────────────────────────────────────────────────────
@@ -222,11 +229,28 @@ class CamCrsp3DNNTask(OD3D_Task):
         cam_kpts_trgt_euc_dist_mean = (cam_kpts_trgt_euc_dist * kpts_valid.float()).sum(dim=1) / n_valid
         cam_kpts_trgt_pck01 = correct.sum(dim=1) / n_valid
 
+        # ── PCK split by visibility (needs obj_kpts2d_mask for both sides) ─────
+        # modal  = both query (src) and target (trgt) keypoints visible
+        # amodal = either query or target keypoint occluded
+        modal_pck = amodal_pck = None
+        src_vis, trgt_vis = batch.src_obj_kpts2d_mask, batch.trgt_obj_kpts2d_mask
+        if src_vis is not None and trgt_vis is not None:
+            both_vis    = src_vis.bool().to(dev) & trgt_vis.bool().to(dev)   # (B, K)
+            modal_mask  = kpts_valid & both_vis
+            amodal_mask = kpts_valid & ~both_vis
+            n_modal  = modal_mask.float().sum(dim=1)
+            n_amodal = amodal_mask.float().sum(dim=1)
+            nan = torch.full_like(n_modal, float("nan"))
+            modal_pck  = torch.where(n_modal  > 0, (correct * modal_mask.float()).sum(dim=1)  / n_modal.clamp(min=1),  nan)
+            amodal_pck = torch.where(n_amodal > 0, (correct * amodal_mask.float()).sum(dim=1) / n_amodal.clamp(min=1), nan)
+
         quant = FrameObjectPairQuantBatch(
             cam_kpts_trgt_euc_dist      = cam_kpts_trgt_euc_dist,
             kpts_mask                   = kpts_valid,
             cam_kpts_trgt_euc_dist_mean = cam_kpts_trgt_euc_dist_mean,
             cam_kpts_trgt_pck01         = cam_kpts_trgt_pck01,
+            cam_kpts_modal_trgt_pck01   = modal_pck,
+            cam_kpts_amodal_trgt_pck01  = amodal_pck,
         )
 
         qualit = self._render_qualit(
@@ -301,10 +325,18 @@ class CamCrsp3DNNTask(OD3D_Task):
                 out.append(r)
             return torch.cat(out, dim=1)
 
+        # amodal = annotated (valid) but NOT visible in the frame (obj_kpts2d_mask=False)
+        def _amodal(valid_b, vis2d, b):
+            if vis2d is None:
+                return None
+            return valid_b & (~vis2d[b].bool().cpu())
+
         imgs = []
         for b in range(B):
             valid   = kpts_valid[b].cpu()
             correct = is_correct[b].cpu()
+            src_amodal  = _amodal(valid, batch.src_obj_kpts2d_mask, b)
+            trgt_amodal = _amodal(valid, batch.trgt_obj_kpts2d_mask, b)
 
             # ── top row: correspondences on the frame RGB ─────────────────────
             frame_row = None
@@ -317,6 +349,7 @@ class CamCrsp3DNNTask(OD3D_Task):
                     frame_row = _draw_corr_panels(
                         _to_uint8_img(src_frames[b]), _to_uint8_img(trgt_frames[b]),
                         src_uv, gt_uv, pred_uv, valid, correct,
+                        left_amodal=src_amodal, right_amodal=trgt_amodal,
                     )
                 except Exception:
                     frame_row = None
@@ -327,7 +360,7 @@ class CamCrsp3DNNTask(OD3D_Task):
             top_row = _render_topdown_corr_img(
                 src_mesh, trgt_mesh,
                 batch.src_obj_kpts3d[b], batch.trgt_obj_kpts3d[b], pred_kpts_ncds[b],
-                valid, correct,
+                valid, correct, src_amodal=src_amodal, trgt_amodal=trgt_amodal,
             )
 
             combined = _vstack([frame_row, top_row])

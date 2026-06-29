@@ -22,6 +22,10 @@ class FrameObjectPairQuantBatch:
     # ── per-sample aggregates ─────────────────────────────────────────────────
     cam_kpts_trgt_euc_dist_mean: Optional[Tensor] = None  # (B,) mean Euclidean dist
     cam_kpts_trgt_pck01:         Optional[Tensor] = None  # (B,) PCK @ 0.1 * trgt_obj_size
+    # PCK split by visibility: modal = both query & target visible, amodal = either
+    # occluded (per-sample NaN when that subset is empty so it's nan-mean excluded)
+    cam_kpts_modal_trgt_pck01:   Optional[Tensor] = None  # (B,)
+    cam_kpts_amodal_trgt_pck01:  Optional[Tensor] = None  # (B,)
 
     # extra per-task metrics
     extra: dict = field(default_factory=dict)
@@ -30,7 +34,8 @@ class FrameObjectPairQuantBatch:
         """Flat dict of scalar means over the batch (nan-safe)."""
         import torch as _torch
         out = {}
-        for fname in ("cam_kpts_trgt_euc_dist_mean", "cam_kpts_trgt_pck01"):
+        for fname in ("cam_kpts_trgt_euc_dist_mean", "cam_kpts_trgt_pck01",
+                      "cam_kpts_modal_trgt_pck01", "cam_kpts_amodal_trgt_pck01"):
             val = getattr(self, fname)
             if val is not None:
                 finite = val.float()[_torch.isfinite(val.float())]

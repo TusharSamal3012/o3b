@@ -512,6 +512,15 @@ class HouseCorr3D(ConfigurableDataset):
         filter_kpts = cfg.filter_has_kpts
         is_real     = cfg.filter_is_real
         kpts_preprocess = path_preprocess / "obj_kpts3d"
+        # When categories are requested, filter_count_max is applied PER category
+        # (indexing only stops once each requested category has that many rows),
+        # so a rare category isn't starved by commoner ones filling a global cap.
+        categories  = set(cfg.categories) if cfg.categories else None
+        cat_counts: dict = {}
+        # Honour the load-time split filter while indexing, so the count_max quota
+        # fills with rows the loader will actually keep (e.g. split='test' must not
+        # be exhausted by 'train' scenes that are processed first).
+        split_filter = None if cfg.split in (None, "all") else cfg.split
 
         print(f"path_raw        : {path_raw}")
         print(f"path_preprocess : {path_preprocess}")
@@ -533,9 +542,11 @@ class HouseCorr3D(ConfigurableDataset):
         con = _sq.connect(db_path, timeout=60)
         cur = con.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("DROP TABLE IF EXISTS frames")
+        # Append to an existing index (INSERT OR IGNORE dedupes on frame_id) so
+        # indexing a new category keeps previously-indexed ones; pass --remove to
+        # rebuild from scratch.
         cur.execute("""
-            CREATE TABLE frames (
+            CREATE TABLE IF NOT EXISTS frames (
                 frame_id         TEXT PRIMARY KEY,
                 scene_name       TEXT    NOT NULL,
                 object_idx       INTEGER NOT NULL,
@@ -562,8 +573,15 @@ class HouseCorr3D(ConfigurableDataset):
         total_rows = matched = scenes_since_commit = 0
         done = False
 
-        def _remaining():
+        def _scene_limit():
+            # per-category cap when categories requested, else global remaining
+            if categories is not None:
+                return limit
             return (limit - matched) if limit else None
+
+        def _all_categories_full() -> bool:
+            return (categories is not None and limit is not None
+                    and all(cat_counts.get(c, 0) >= limit for c in categories))
 
         def _update(n_total: int, n_match: int) -> bool:
             nonlocal total_rows, matched, scenes_since_commit
@@ -573,9 +591,11 @@ class HouseCorr3D(ConfigurableDataset):
             if scenes_since_commit >= COMMIT_EVERY:
                 con.commit()
                 scenes_since_commit = 0
+            if categories is not None:
+                return _all_categories_full()
             return bool(limit and matched >= limit)
 
-        if rope_root.exists() and not done and is_real is not False:
+        if rope_root.exists() and not done and is_real is not False and split_filter in (None, "test"):
             scene_dirs = sorted(d for d in rope_root.iterdir() if d.is_dir())
             print(f"\nIndexing ROPE ({len(scene_dirs)} scenes, split=test, data_type=real)")
             bar = tqdm(scene_dirs, unit="scene", desc="ROPE")
@@ -583,7 +603,8 @@ class HouseCorr3D(ConfigurableDataset):
                 n_total, n_match = _index_scene(
                     cur=cur, scene_dir=scene_dir, scene_name=scene_dir.name,
                     split="test", data_type="real", path_raw=path_raw,
-                    kpts_preprocess=kpts_preprocess, limit=_remaining(), filter_kpts=filter_kpts,
+                    kpts_preprocess=kpts_preprocess, limit=_scene_limit(), filter_kpts=filter_kpts,
+                    categories=categories, cat_counts=cat_counts,
                 )
                 bar.set_postfix(rows=total_rows, matched=matched)
                 if _update(n_total, n_match):
@@ -591,7 +612,6 @@ class HouseCorr3D(ConfigurableDataset):
 
         if sope_root.exists() and not done and is_real is not True:
             patch_dirs = sorted(d for d in sope_root.iterdir() if d.is_dir())
-            print(f"\nIndexing SOPE ({len(patch_dirs)} patches, data_type=synthetic)")
 
             def _sope_scenes():
                 for patch_dir in patch_dirs:
@@ -603,12 +623,18 @@ class HouseCorr3D(ConfigurableDataset):
                             for scene_dir in sorted(d for d in kind_dir.iterdir() if d.is_dir()):
                                 yield scene_dir, f"{patch_dir.name}_{scene_dir.name}", split_name
 
-            bar = tqdm(_sope_scenes(), unit="scene", desc="SOPE")
+            # materialise so the progress bar can show total / remaining scenes
+            # (and drop scenes whose split the loader would filter out)
+            sope_scenes = [s for s in _sope_scenes() if split_filter is None or s[2] == split_filter]
+            print(f"\nIndexing SOPE ({len(patch_dirs)} patches, {len(sope_scenes)} scenes, "
+                  f"split={split_filter or 'all'}, data_type=synthetic)")
+            bar = tqdm(sope_scenes, unit="scene", desc="SOPE")
             for scene_dir, scene_name, split_name in bar:
                 n_total, n_match = _index_scene(
                     cur=cur, scene_dir=scene_dir, scene_name=scene_name,
                     split=split_name, data_type="synthetic", path_raw=path_raw,
-                    kpts_preprocess=kpts_preprocess, limit=_remaining(), filter_kpts=filter_kpts,
+                    kpts_preprocess=kpts_preprocess, limit=_scene_limit(), filter_kpts=filter_kpts,
+                    categories=categories, cat_counts=cat_counts,
                 )
                 bar.set_postfix(rows=total_rows, matched=matched)
                 if _update(n_total, n_match):

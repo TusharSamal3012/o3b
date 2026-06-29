@@ -79,7 +79,9 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     n_samples = 0
     qualit_log_batches = eval_cfg.get("qualit_log_batches", 8)
 
-    for batch_idx, batch in enumerate(loader):
+    from tqdm import tqdm
+    bar = tqdm(loader, total=len(loader), unit="batch", desc="eval")
+    for batch_idx, batch in enumerate(bar):
         if method is not None:
             batch = method(batch)
         quant, qualit = task(batch)

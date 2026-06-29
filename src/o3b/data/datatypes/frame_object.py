@@ -268,6 +268,8 @@ class FrameObjectPairBatch:
     trgt_obj_kpts3d:      Optional[Tensor] = None  # (B, K, 3)
     src_obj_kpts3d_mask:  Optional[Tensor] = None  # (B, K) bool
     trgt_obj_kpts3d_mask: Optional[Tensor] = None  # (B, K) bool
+    src_obj_kpts2d_mask:  Optional[Tensor] = None  # (B, K) bool — visible in frame
+    trgt_obj_kpts2d_mask: Optional[Tensor] = None  # (B, K) bool
     # ── ground-truth poses ────────────────────────────────────────────────────
     src_cam_tform4x4_obj:       Optional[Tensor] = None  # (B, 4, 4) cam←obj (metric)
     trgt_cam_tform4x4_obj:      Optional[Tensor] = None  # (B, 4, 4)
@@ -337,6 +339,7 @@ def collate_frame_object_pairs(
     for side in ("src", "trgt"):
         setattr(out, f"{side}_obj_kpts3d",            _get("obj_kpts3d", side))
         setattr(out, f"{side}_obj_kpts3d_mask",       _get("obj_kpts3d_mask", side))
+        setattr(out, f"{side}_obj_kpts2d_mask",       _get("obj_kpts2d_mask", side))
         setattr(out, f"{side}_cam_tform4x4_obj",      _get("cam_tform4x4_obj", side))
         setattr(out, f"{side}_cam_tform4x4_obj_ncds", _get("cam_tform4x4_obj_ncds", side))
         setattr(out, f"{side}_obj_size",              _scalar("obj_size", side))

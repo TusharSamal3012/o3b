@@ -82,7 +82,6 @@ class GenPose2(OD3D_Model):
             torch.tensor(obj_tform4x4, dtype=torch.float32)
             if obj_tform4x4 is not None else None
         )
-
         self.genpose2 = None
         if self.genpose2_fpath is not None:
             self._init_genpose2()

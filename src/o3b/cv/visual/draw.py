@@ -281,14 +281,42 @@ def draw_bbox3d(img, obj_size3d, cam_intr4x4, cam_tform4x4_obj, cam_scale1d=None
 
     return img
 
+def _clip_line_to_rect(x0, y0, x1, y1, xmax, ymax, xmin=0.0, ymin=0.0):
+    """Liang–Barsky clip of segment (x0,y0)-(x1,y1) to [xmin,xmax]x[ymin,ymax].
+
+    Returns (x0,y0,x1,y1,t0,t1) of the clipped segment (t0,t1 are the clip
+    parameters along the original segment), or None if it lies fully outside.
+    """
+    dx, dy = x1 - x0, y1 - y0
+    p = (-dx, dx, -dy, dy)
+    q = (x0 - xmin, xmax - x0, y0 - ymin, ymax - y0)
+    t0, t1 = 0.0, 1.0
+    for pi, qi in zip(p, q):
+        if pi == 0.0:
+            if qi < 0.0:
+                return None  # parallel to an edge and outside it
+        else:
+            t = qi / pi
+            if pi < 0.0:
+                if t > t1:
+                    return None
+                t0 = max(t0, t)
+            else:
+                if t < t0:
+                    return None
+                t1 = min(t1, t)
+    return (x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy, t0, t1)
+
+
 def draw_lines(img, lines, colors=None, thickness=2, steps=10):
     # lines: K x 2 x 2
     K = lines.shape[0]
     H = img.shape[-2]
     W = img.shape[-1]
 
-    lines[..., 0] = lines[..., 0].clamp(-thickness, W + thickness)
-    lines[..., 1] = lines[..., 1].clamp(-thickness, H + thickness)
+    # Endpoints outside the image are clipped to the image rectangle (keeping the
+    # visible portion) rather than clamped to the border, which would warp edges
+    # that leave the frame; segments fully outside are skipped.
 
     device = img.device
     img = tensor_to_cv_img(img.clone())
@@ -301,24 +329,29 @@ def draw_lines(img, lines, colors=None, thickness=2, steps=10):
         colors = torch.from_numpy(np.tile(np.array(colors), reps=(K, 1)) / 255)
     colors = (colors.detach().cpu().numpy() * 255).astype(np.uint8)
     for k in range(K):
+        clipped = _clip_line_to_rect(
+            float(lines[k, 0, 0]), float(lines[k, 0, 1]),
+            float(lines[k, 1, 0]), float(lines[k, 1, 1]),
+            W - 1, H - 1,
+        )
+        if clipped is None:
+            continue
+        cx0, cy0, cx1, cy1, t0, t1 = clipped
+        p0 = (int(round(cx0)), int(round(cy0)))
+        p1 = (int(round(cx1)), int(round(cy1)))
         if colors.ndim == 3:
-            img = draw_gradient_line(img, 
-                                     p0=(int(lines[k, 0, 0].item()), int(lines[k, 0, 1].item())), 
-                                     p1=(int(lines[k, 1, 0].item()), int(lines[k, 1, 1].item())),
-                                     c0=colors[k, 0, :],
-                                     c1=colors[k, 1, :],
-                                     steps=steps,
-                                     thickness=thickness)
+            c0 = colors[k, 0, :].astype(np.float32)
+            c1 = colors[k, 1, :].astype(np.float32)
+            # interpolate the endpoint colours at the clip parameters
+            img = draw_gradient_line(
+                img, p0=p0, p1=p1,
+                c0=c0 + t0 * (c1 - c0), c1=c0 + t1 * (c1 - c0),
+                steps=steps, thickness=thickness,
+            )
         else:
             cv2.line(
-                img,
-                pt1=(int(lines[k, 0, 0].item()), int(lines[k, 0, 1].item())),
-                pt2=(int(lines[k, 1, 0].item()), int(lines[k, 1, 1].item())),
-                color=(
-                    colors[k, 0].item(),
-                    colors[k, 1].item(),
-                    colors[k, 2].item(),
-                ),
+                img, pt1=p0, pt2=p1,
+                color=(int(colors[k, 0]), int(colors[k, 1]), int(colors[k, 2])),
                 thickness=thickness,
             )
     # img = img / 255.0

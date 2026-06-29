@@ -17,7 +17,7 @@ mesh_type: "mc16"
 item_type: frame_object
 
 # split: "train" | "test" | "all"
-split: all
+split: test
 
 # filter_is_real: null → all data  |  false → synthetic only  |  true → real only
 filter_is_real: false
@@ -37,14 +37,16 @@ modalities:
   - category
 
 filter_has_kpts: true
-filter_count_max: 50
+filter_count_max: 1000 # per category if categories is applied
 
 
 transform:
   class_name: CropCamBBox2D
-  H: 224 # 256
-  W: 224 # 256
+  H: 256 # 256
+  W: 256 # 256
   # per-side crop margin as a fraction of bbox size (crop spans 1 + 2*bbox_overlap)
   bbox_overlap: 0.15
 
 categories:
+  #- toy_motorcycle
+  - hair_dryer

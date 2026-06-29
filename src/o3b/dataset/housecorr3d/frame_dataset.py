@@ -799,6 +799,8 @@ def _index_scene(
     kpts_preprocess: Path,
     limit: Optional[int] = None,
     filter_kpts: bool = False,
+    categories: Optional[set] = None,
+    cat_counts: Optional[dict] = None,
 ) -> tuple[int, int]:
     """Insert frame-object rows for one scene. Returns (n_total, n_matching).
 
@@ -807,7 +809,10 @@ def _index_scene(
     - is_valid=1 is always required (matches the load-time query)
     - filter_kpts=True additionally requires has_kpts=1
 
-    Stops early once *limit* matching rows have been inserted (None = no limit).
+    When *categories* is given, only those categories are indexed and *limit* is
+    applied **per category** (tracked across scenes via the shared *cat_counts*
+    dict); the scene stops once every requested category has reached its quota.
+    Otherwise *limit* is a global cap and the scene stops once it is hit.
     """
     from o3b.dataset.housecorr3d._frame_utils import (
         build_cam_intr4x4,
@@ -815,6 +820,13 @@ def _index_scene(
         build_obj_cam_tform,
         _png_size,
     )
+
+    if cat_counts is None:
+        cat_counts = {}
+
+    def _all_categories_full() -> bool:
+        return (categories is not None and limit is not None
+                and all(cat_counts.get(c, 0) >= limit for c in categories))
 
     frame_ids_color = sorted(
         p.stem[: -len("_color")]
@@ -882,6 +894,14 @@ def _index_scene(
                 obj_scale = 1.0
             has_kpts = 1 if (kpts_preprocess / object_id / "kpts3d.pt").exists() else 0
 
+            matches = bool(is_valid and (not filter_kpts or has_kpts))
+            if categories is not None:
+                # only index requested categories, capped per category
+                if category not in categories:
+                    continue
+                if limit is not None and matches and cat_counts.get(category, 0) >= limit:
+                    continue
+
             # per-object cam_tform4x4_obj: uses the object's own quaternion/translation
             try:
                 cam_tform4x4_obj_list = build_obj_cam_tform(obj)
@@ -913,9 +933,14 @@ def _index_scene(
             n += 1
             # Match the load-time filter (always requires is_valid=1) so that
             # *limit* caps the number of actually-loadable rows.
-            if is_valid and (not filter_kpts or has_kpts):
+            if matches:
                 n_match += 1
-            if limit is not None and n_match >= limit:
+                if categories is not None and category is not None:
+                    cat_counts[category] = cat_counts.get(category, 0) + 1
+            if categories is not None:
+                if _all_categories_full():
+                    return n, n_match
+            elif limit is not None and n_match >= limit:
                 return n, n_match
     return n, n_match
 
