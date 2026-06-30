@@ -42,5 +42,10 @@ filter_count_max: 1000 # per category if categories is applied
 #   cross   → every view of A with every view of B  (~n_views^2)
 frame_pair_view_mode: aligned
 
+#category: "hair_dryer"
+#sharded_name: hc3d_frame_object_pair_${category}
+#sharded_override: true
+#sharded_shard_size: 1000  # items per Arrow shard; lower = less peak memory during build
+
 #categories:
 #  - toy_motorcycle

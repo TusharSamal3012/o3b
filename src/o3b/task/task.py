@@ -46,11 +46,11 @@ def build_task(cfg: DictConfig) -> "OD3D_Task":
 
 class OD3D_Task:
 
-    def forward(self, batch):
+    def forward(self, batch, return_qualit: bool = True):
         raise NotImplementedError
 
-    def __call__(self, batch):
-        return self.forward(batch)
+    def __call__(self, batch, return_qualit: bool = True):
+        return self.forward(batch, return_qualit=return_qualit)
 
     @classmethod
     def create_by_name(cls, name: str, config: Optional[dict] = None) -> "OD3D_Task":

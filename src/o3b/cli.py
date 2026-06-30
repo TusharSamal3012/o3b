@@ -1656,6 +1656,16 @@ def _run_bench_run(args) -> None:
     else:
         combos = [()]  # single run with no ablation
 
+    # ── pre-resolve dataset section in isolation so ${key} interpolations
+    #    refer to sibling keys (e.g. ${category}) regardless of nesting later ──
+    if isinstance(raw.get("dataset"), dict):
+        try:
+            raw["dataset"] = OmegaConf.to_container(
+                OmegaConf.create(raw["dataset"]), resolve=True
+            )
+        except Exception:
+            pass  # leave unresolved; the per-run merge will handle it
+
     # ── run once per combination ──────────────────────────────────────────────
     for combo in combos:
         if combo:

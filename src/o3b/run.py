@@ -82,9 +82,17 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     from tqdm import tqdm
     bar = tqdm(loader, total=len(loader), unit="batch", desc="eval")
     for batch_idx, batch in enumerate(bar):
+        return_qualit = (_wb is not None) and (batch_idx < qualit_log_batches)
+
+        method_qualit = None
         if method is not None:
-            batch = method(batch)
-        quant, qualit = task(batch)
+            result = method(batch, return_qualit=return_qualit)
+            if isinstance(result, tuple):
+                batch, method_qualit = result
+            else:
+                batch = result
+
+        quant, qualit = task(batch, return_qualit=return_qualit)
 
         B = (batch.src_obj_kpts3d.shape[0]
              if batch.src_obj_kpts3d is not None else batch_size)
@@ -95,11 +103,12 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
 
         if _wb is not None:
             wb_log = quant.to_wandb_log(prefix="batch", wb=_wb)
-            wb_log.update(qualit.to_wandb_log(
-                prefix="qualit",
-                wb=_wb,
-                log_imgs=(batch_idx < qualit_log_batches),
-            ))
+            if qualit is not None:
+                wb_log.update(qualit.to_wandb_log(prefix="qualit", wb=_wb, log_imgs=True))
+            if method_qualit is not None:
+                for k, v in method_qualit.items():
+                    import numpy as np
+                    wb_log[k] = _wb.Image(v) if isinstance(v, np.ndarray) else v
             wb_log["batch/n_samples"] = n_samples
             _wb.log(wb_log, step=batch_idx)
 

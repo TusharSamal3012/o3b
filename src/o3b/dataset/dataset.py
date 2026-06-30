@@ -82,8 +82,9 @@ class DatasetConfig:
     # HuggingFace sharding: when set, items are materialised once into
     # path_preprocess/sharded/<sharded_name> and loaded from there on subsequent
     # runs.  sharded_override=True rebuilds the shards even if they already exist.
-    sharded_name:     Optional[str]         = None
-    sharded_override: bool                  = False
+    sharded_name:      Optional[str]        = None
+    sharded_override:  bool                 = False
+    sharded_shard_size: int                 = 1000
 
     # extra per-dataset kwargs passed through to the implementation
     extra: dict                            = field(default_factory=dict)
@@ -114,8 +115,9 @@ class DatasetConfig:
             "obj_tform4x4":         self.obj_tform4x4,
             "cam_tform4x4_cam_raw": self.cam_tform4x4_cam_raw,
             "transform":            self.transform,
-            "sharded_name":         self.sharded_name,
-            "sharded_override":     self.sharded_override,
+            "sharded_name":       self.sharded_name,
+            "sharded_override":   self.sharded_override,
+            "sharded_shard_size": self.sharded_shard_size,
             "extra":           self.extra,
         }
         path.write_text(yaml.safe_dump(d, sort_keys=False))
@@ -148,6 +150,7 @@ class DatasetConfig:
             transform            = d.get("transform"),
             sharded_name         = d.get("sharded_name"),
             sharded_override     = bool(d.get("sharded_override", False)),
+            sharded_shard_size   = int(d.get("sharded_shard_size", 1000)),
             extra           = d.get("extra", {}),
         )
 
@@ -273,7 +276,7 @@ class ConfigurableDataset(_TorchDataset):
     def _setup_sharded(self) -> None:
         """Load the sharded dataset, building it from raw items if necessary."""
         from o3b.dataset.sharding import (
-            build_sharded_dataset, item_to_record,
+            build_sharded_dataset_from_generator, item_to_record,
             read_sharded_dataset, write_sharded_dataset,
         )
 
@@ -288,13 +291,18 @@ class ConfigurableDataset(_TorchDataset):
         action = "Overriding" if path.exists() else "Building"
         n = len(self)
         print(f"{action} sharded dataset at {path} ({n} items)…")
-        records: list[dict] = []
-        for i in tqdm(range(n), desc="Sharding", unit="item"):
-            item = self._load_item(i)
-            if item is None:
-                continue
-            records.append(item_to_record(item))
-        hf = build_sharded_dataset(records)
+
+        pbar = tqdm(total=n, desc="Sharding", unit="item")
+
+        def _gen():
+            for i in range(n):
+                item = self._load_item(i)
+                pbar.update(1)
+                if item is not None:
+                    yield item_to_record(item)
+
+        hf = build_sharded_dataset_from_generator(_gen, writer_batch_size=self.cfg.sharded_shard_size)
+        pbar.close()
         write_sharded_dataset(hf, path)
         self._sharded = read_sharded_dataset(path)
         print(f"Done. Wrote {len(self._sharded)} items → {path}")

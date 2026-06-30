@@ -101,6 +101,17 @@ def build_sharded_dataset(records: list[dict]):
     return HFDataset.from_list(records)
 
 
+def build_sharded_dataset_from_generator(gen_fn, writer_batch_size: int = 1000):
+    """Build a HuggingFace Dataset by streaming records from a generator.
+
+    Processes ``writer_batch_size`` records at a time so peak memory is
+    bounded to that many items rather than the full dataset.  ``gen_fn``
+    is a zero-argument callable that returns an iterator of record dicts.
+    """
+    from datasets import Dataset as HFDataset
+    return HFDataset.from_generator(gen_fn, num_proc=1, writer_batch_size=writer_batch_size)
+
+
 def _remove_dir(path: Path) -> None:
     """Remove a directory robustly, tolerating NFS ``.nfsXXXX`` leftovers.
 

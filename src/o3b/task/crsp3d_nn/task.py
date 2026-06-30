@@ -250,7 +250,7 @@ class Crsp3DNNTask(OD3D_Task):
     def __init__(self, **kwargs):
         pass
 
-    def forward(self, batch: ObjectPairBatch) -> Tuple[ObjectPairQuantBatch, ObjectPairQualitBatch]:
+    def forward(self, batch: ObjectPairBatch, return_qualit: bool = True) -> Tuple[ObjectPairQuantBatch, ObjectPairQualitBatch]:
         src_verts       = batch.src_verts3d             # (B, V_src, 3)
         src_feats       = batch.src_verts3d_feats       # (B, V_src, F)
         trgt_verts      = batch.trgt_verts3d            # (B, V_trgt, 3)
@@ -503,6 +503,9 @@ class Crsp3DNNTask(OD3D_Task):
             )
 
         # ── qualitative: keypoint correspondence images ───────────────────────
+        if not return_qualit:
+            return ObjectPairQuantBatch(**quant_kpts, **quant_parts), None
+
         qualit_imgs = None
         if has_kpts and pred_trgt_kpt_pos is not None:
             qualit_imgs = _render_corr_imgs(

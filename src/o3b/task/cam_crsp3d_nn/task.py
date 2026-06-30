@@ -169,7 +169,7 @@ class CamCrsp3DNNTask(OD3D_Task):
     def __init__(self, qualit: bool = True, **kwargs):
         self.qualit = qualit
 
-    def forward(self, batch: FrameObjectPairBatch) -> Tuple[FrameObjectPairQuantBatch, FrameObjectPairQualitBatch]:
+    def forward(self, batch: FrameObjectPairBatch, return_qualit: bool = True) -> Tuple[FrameObjectPairQuantBatch, FrameObjectPairQualitBatch]:
         from o3b.cv.geometry.transform import (
             transf3d_broadcast, tform4x4_broadcast, inv_tform4x4,
         )
@@ -253,10 +253,13 @@ class CamCrsp3DNNTask(OD3D_Task):
             cam_kpts_amodal_trgt_pck01  = amodal_pck,
         )
 
-        qualit = self._render_qualit(
-            batch, query_kpts_cam_q, gt_trgt_kpts_cam_t, pred_trgt_kpts_cam_t,
-            trgt_ncds, kpts_valid, is_correct,
-        ) if self.qualit else FrameObjectPairQualitBatch()
+        if self.qualit and return_qualit:
+            qualit = self._render_qualit(
+                batch, query_kpts_cam_q, gt_trgt_kpts_cam_t, pred_trgt_kpts_cam_t,
+                trgt_ncds, kpts_valid, is_correct,
+            )
+        else:
+            qualit = None
 
         return quant, qualit
 
