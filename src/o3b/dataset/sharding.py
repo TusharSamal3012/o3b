@@ -43,11 +43,12 @@ def _encode(value):
         return None
     if isinstance(value, torch.Tensor):
         t = value.detach().cpu()
+        np_array = t.numpy()
         return {
-            "__t__":  1,
-            "shape":  list(t.shape),
-            "dtype":  str(t.dtype).replace("torch.", ""),
-            "data":   t.flatten().tolist(),
+            "__t__": 2,                              # v2: bytes encoding
+            "shape": list(t.shape),
+            "dtype": str(t.dtype).replace("torch.", ""),
+            "data":  np_array.tobytes(),             # raw bytes, O(1) per element
         }
     if is_dataclass(value) and not isinstance(value, type):
         return {
@@ -64,12 +65,20 @@ def _decode(value):
         return None
     if isinstance(value, dict):
         if "__t__" in value:
-            dtype = getattr(torch, value["dtype"])
-            shape = value["shape"]
-            data  = value["data"]
-            if len(data) == 0:
-                return torch.zeros(shape, dtype=dtype)
-            return torch.tensor(data, dtype=dtype).reshape(shape)
+            import numpy as np
+            dtype_str = value["dtype"]
+            shape     = value["shape"]
+            data      = value["data"]
+            if value["__t__"] == 2 and isinstance(data, (bytes, bytearray, memoryview)):
+                # v2: raw bytes → numpy → torch (fast path)
+                arr = np.frombuffer(data, dtype=np.dtype(dtype_str)).copy()
+                return torch.from_numpy(arr.reshape(shape))
+            else:
+                # v1 legacy: Python list (slow path, kept for backward compatibility)
+                torch_dtype = getattr(torch, dtype_str)
+                if len(data) == 0:
+                    return torch.zeros(shape, dtype=torch_dtype)
+                return torch.tensor(data, dtype=torch_dtype).reshape(shape)
         if "__dc__" in value:
             cls    = _dataclass_registry()[value["__dc__"]]
             kwargs = {k: _decode(v) for k, v in value["fields"].items()}

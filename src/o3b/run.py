@@ -21,8 +21,9 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
     dataset     = build_dataset(dataset_cfg)
     print(f"Dataset: {dataset_cfg.class_name}  ({len(dataset)} items)")
 
-    eval_cfg   = run_raw.get("eval") or {}
-    batch_size = eval_cfg.get("batch_size", 4)
+    eval_cfg    = run_raw.get("eval") or {}
+    batch_size  = eval_cfg.get("batch_size", 4)
+    num_workers = int(eval_cfg.get("num_workers", 4))
 
     collate_fn = (collate_frame_object_pairs
                   if dataset_cfg.item_type == ItemType.FRAME_OBJECT_PAIR
@@ -32,7 +33,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
         batch_size=batch_size,
         collate_fn=collate_fn,
         shuffle=False,
-        num_workers=0,
+        num_workers=num_workers,
+        persistent_workers=num_workers > 0,
     )
 
     task_cfg = OmegaConf.create(run_raw["task"])
