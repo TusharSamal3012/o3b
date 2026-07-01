@@ -281,6 +281,32 @@ def draw_bbox3d(img, obj_size3d, cam_intr4x4, cam_tform4x4_obj, cam_scale1d=None
 
     return img
 
+def draw_bbox3d_corners(img, corners_cam, cam_intr4x4, color=(255, 165, 0), thickness=2):
+    """Draw a 3D bounding box from 8 camera-space corners (OpenGL convention, -Z forward).
+
+    corners_cam: (8, 3) tensor, camera-space corners
+    cam_intr4x4: (4, 4) tensor, camera intrinsics
+    """
+    from o3b.cv.geometry.transform import proj3d2d_broadcast
+
+    intr = cam_intr4x4.float().cpu().clone()
+    intr[:, 1] = -intr[:, 1]  # OpenGL column flip
+    intr[:, 2] = -intr[:, 2]
+
+    corners = corners_cam.float().cpu()  # (8, 3)
+    kpts2d = proj3d2d_broadcast(corners, intr)  # (8, 2)
+
+    EDGE_IDX = torch.tensor(
+        [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)],
+        dtype=torch.long,
+    )  # (12, 2)
+    lines2d = kpts2d[EDGE_IDX]  # (12, 2, 2)
+    c = [color[0]/255., color[1]/255., color[2]/255.]
+    clr = torch.tensor([c, c] * 12, dtype=torch.float32).reshape(12, 2, 3)
+
+    return draw_lines(img=img, lines=lines2d, colors=clr, thickness=thickness)
+
+
 def _clip_line_to_rect(x0, y0, x1, y1, xmax, ymax, xmin=0.0, ymin=0.0):
     """Liang–Barsky clip of segment (x0,y0)-(x1,y1) to [xmin,xmax]x[ymin,ymax].
 

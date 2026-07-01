@@ -32,18 +32,22 @@ class DINOv2(OD3D_Model):
         downsample_rate=16,
         out_res=None,
         stride=None,
-        normalize = False,
-        hub_repo = "facebookresearch/dinov2",
-        hub_model = "dinov2_vits14", # dino_vits8, dino_vitb8, dino_vits16, dino_vitb16, dinov2_vits14, dinov2_vitb14, dinov2_vitl14, dinov2_vitg14
-        weights = "default", 
-        layers_returned = [0],  # choose from [0, 1] start with deepest (1)
-        pca = False,
-        pca_dim= 64, 
+        normalize=False,
+        transform_rgb_uint8_to_float=False,
+        transform_rgb_normalize=True,
+        hub_repo="facebookresearch/dinov2",
+        hub_model="dinov2_vits14",  # dino_vits8, dino_vitb8, dino_vits16, dino_vitb16, dinov2_vits14, dinov2_vitb14, dinov2_vitl14, dinov2_vitg14
+        weights="default",
+        layers_returned=[0],  # choose from [0, 1] start with deepest (1)
+        pca=False,
+        pca_dim=64,
     ):
         super().__init__()
 
         self.freeze = freeze
         self.normalize = normalize
+        self.transform_rgb_uint8_to_float = transform_rgb_uint8_to_float
+        self.transform_rgb_normalize = transform_rgb_normalize
 
         #self.transform = SequentialTransform(
         #    [
@@ -211,10 +215,13 @@ class DINOv2(OD3D_Model):
 
         x = frames_gt.rgb
 
-        # ImageNet normalisation — expects raw [0,1] RGB from the caller
-        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
-        std  = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
-        x = (x - mean) / std
+        if self.transform_rgb_uint8_to_float:
+            x = x.float() / 255.0
+
+        if self.transform_rgb_normalize:
+            mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+            std  = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+            x = (x - mean) / std
 
         if x.dim() == 3:
             C, H, W = x.shape

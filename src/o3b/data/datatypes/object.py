@@ -89,6 +89,7 @@ def _add_visibility_gui(server, label: str, handle_dicts: "list[dict]") -> objec
         ("mesh_ncds0c_featnn", "Mesh NCDS0C FeatNN"),
         ("pts3d",              "Points"),
         ("kpts3d",             "Keypoints"),
+        ("bbox3d",             "BBox3D"),
     ]
     gui_folder = server.gui.add_folder(label)
     with gui_folder:
@@ -161,6 +162,8 @@ class Object:
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (4, 4)
     obj_size_ncds:           Optional[float]  = None  # max NCDS bounding-box extent (= 2.0 when set)
     obj_size:                Optional[float]  = None  # max bounding-box extent in real units
+    obj_size3d:              Optional[Tensor] = None  # (3,)  bounding-box side lengths in object space
+    obj_bbox3d:              Optional[Tensor] = None  # (8, 3) bounding-box corners in object space
     obj_kpts3d:              Optional[Tensor] = None  # (K, 3)
     obj_kpts3d_mask:         Optional[Tensor] = None  # (K,)  bool
     obj_verts_part_id:       Optional[Tensor] = None  # (V,)  int64, -1 = unlabeled
@@ -199,6 +202,10 @@ class Object:
         if self.obj_ncds0c_tform4x4_obj is not None:
             new_tform = self.obj_ncds0c_tform4x4_obj.float().cpu() @ torch.linalg.inv(T)
 
+        new_bbox3d = None
+        if self.obj_bbox3d is not None:
+            new_bbox3d = _xfm(self.obj_bbox3d)  # (8, 3) corners
+
         return _dc_replace(
             self,
             pts3d                   = _xfm(self.pts3d),
@@ -206,6 +213,8 @@ class Object:
             obj_kpts3d              = _xfm(self.obj_kpts3d),
             mesh                    = new_mesh,
             obj_ncds0c_tform4x4_obj = new_tform,
+            obj_bbox3d              = new_bbox3d,
+            obj_size3d              = None,  # recompute from bbox3d after transform
         )
 
     def render_modalities(
@@ -380,6 +389,31 @@ class Object:
                     position=position_offset,
                 )
 
+        bbox3d_handle = None
+        if self.obj_bbox3d is not None:
+            corners_metric = self.obj_bbox3d.float().cpu()  # (8, 3) metric space
+            # obj_bbox3d is in metric space; mesh is displayed in NCDS space.
+            # Convert to NCDS via inv(obj_ncds0c_tform4x4_obj) for correct overlay.
+            if self.obj_ncds0c_tform4x4_obj is not None:
+                from o3b.cv.geometry.transform import transf3d_broadcast, inv_tform4x4
+                tform_to_ncds = inv_tform4x4(self.obj_ncds0c_tform4x4_obj.float().cpu())
+                corners = transf3d_broadcast(corners_metric, tform_to_ncds).numpy()
+            else:
+                corners = corners_metric.numpy()
+            EDGES = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+            off = np.array(position_offset, dtype=np.float32)
+            starts = np.array([corners[i] + off for i, _ in EDGES], dtype=np.float32)
+            ends   = np.array([corners[j] + off for _, j in EDGES], dtype=np.float32)
+            pts    = np.stack([starts, ends], axis=1)  # (12, 2, 3)
+            clr    = np.full((12, 2, 3), [0.0, 0.8, 0.8], dtype=np.float32)
+            try:
+                bbox3d_handle = server.scene.add_line_segments(
+                    f"{node_prefix}/bbox3d", points=pts, colors=clr, line_width=2.0,
+                )
+                bbox3d_handle.visible = False
+            except Exception:
+                bbox3d_handle = None
+
         return {
             "mesh":               mesh_handle,
             "mesh_feats":         mesh_feats_handle,
@@ -388,6 +422,7 @@ class Object:
             "mesh_ncds0c_featnn": mesh_nocs_featnn_handle,
             "pts3d":              pts_handle,
             "kpts3d":             kpts_handle,
+            "bbox3d":             bbox3d_handle,
         }
 
 

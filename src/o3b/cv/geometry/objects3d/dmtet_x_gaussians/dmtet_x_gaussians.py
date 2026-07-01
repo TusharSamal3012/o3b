@@ -139,7 +139,7 @@ class DMTet_x_Gaussians(Meshes_x_Gaussians):
         )
 
         # note: import on-the-fly to avoid circular import
-        from o3b.models.heads.coordmlp import CoordMLP
+        from o3b.model.coordmlp.model import CoordMLP
 
         for m in range(self.meshes_count):
             # grid_scale = self.get_ranges()[m]
@@ -373,18 +373,26 @@ class DMTet_x_Gaussians(Meshes_x_Gaussians):
         """
 
         sdf_init = pts.detach().norm(dim=-1, keepdim=True) - self.init_radius
-        from o3b.data.batch_datatypes import OD3D_ModelData
+        from types import SimpleNamespace
 
-        sdf_delta = self.sdf_coordmlps[object_id](
-            OD3D_ModelData(pts3d=pts[None,]),
-        ).feat[0]
+        _f = SimpleNamespace(
+            pts3d=pts[None,], feat=None, latent=None,
+            latent_mu=None, latent_logvar=None, feat_mu=None, feat_logvar=None,
+        )
+        _, _pred = self.sdf_coordmlps[object_id].forward(_f, _f)
+        sdf_delta = _pred.feat[0]
         sdf_vals = sdf_init + sdf_delta
         return sdf_vals
 
     def get_feats(self, pts, object_id):
-        from o3b.data.batch_datatypes import OD3D_ModelData
+        from types import SimpleNamespace
 
-        feats = self.feat_coordmlps[object_id](OD3D_ModelData(pts3d=pts[None,])).feat[0]
+        _f = SimpleNamespace(
+            pts3d=pts[None,], feat=None, latent=None,
+            latent_mu=None, latent_logvar=None, feat_mu=None, feat_logvar=None,
+        )
+        _, _pred = self.feat_coordmlps[object_id].forward(_f, _f)
+        feats = _pred.feat[0]
         return feats
 
     def get_sdf_gradient(self, object_id):

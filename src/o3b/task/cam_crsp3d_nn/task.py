@@ -66,24 +66,30 @@ def _draw_corr_panels(left, right, left_uv, right_gt_uv, right_pred_uv, valid, c
     pil = Image.fromarray(np.concatenate([left, right], axis=1))
     draw = ImageDraw.Draw(pil)
     draw.line([(Wl, 0), (Wl, H - 1)], fill=(120, 120, 120), width=2)
+    from o3b.cv.visual.draw import get_colors
+    K = len(valid)
+    kpt_colors_f = get_colors(K)  # (K, 3) float [0, 1], distinct per keypoint
     r = max(3, H // 64)
     for k in range(len(valid)):
         if not bool(valid[k]):
             continue
-        col = (0, 180, 0) if bool(correct[k]) else (220, 0, 0)
+        col     = (0, 180, 0) if bool(correct[k]) else (0, 100, 220)     # line: green / blue
+        kpt_col = tuple((kpt_colors_f[k] * 255).round().int().tolist())   # keypoint: per-index color
         sx, sy = int(np.clip(left_uv[k, 0], 0, Wl - 1)),       int(np.clip(left_uv[k, 1], 0, H - 1))
         gx, gy = int(np.clip(right_gt_uv[k, 0], 0, Wr - 1)),   int(np.clip(right_gt_uv[k, 1], 0, H - 1))
         px, py = int(np.clip(right_pred_uv[k, 0], 0, Wr - 1)), int(np.clip(right_pred_uv[k, 1], 0, H - 1))
         gx += Wl; px += Wl
         rb = max(1, r // 2)  # black centre dot marks an amodal (occluded) keypoint
-        draw.line([(sx, sy), (px, py)], fill=col, width=1)               # query → predicted
-        draw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=col, outline=(0, 0, 0))           # source
+        draw.line([(sx, sy), (px, py)], fill=col, width=1)                         # query → predicted
+        draw.ellipse([sx - r, sy - r, sx + r, sy + r], fill=kpt_col, outline=(0, 0, 0))       # source
         if left_amodal is not None and bool(left_amodal[k]):
             draw.ellipse([sx - rb, sy - rb, sx + rb, sy + rb], fill=(0, 0, 0))
-        draw.ellipse([gx - r, gy - r, gx + r, gy + r], outline=(255, 255, 255), width=2)      # GT ring
+        draw.ellipse([gx - r, gy - r, gx + r, gy + r], outline=kpt_col, width=2)             # GT ring
         if right_amodal is not None and bool(right_amodal[k]):
             draw.ellipse([gx - rb, gy - rb, gx + rb, gy + rb], fill=(0, 0, 0))
-        draw.ellipse([px - r, py - r, px + r, py + r], fill=col, outline=(0, 0, 0))           # predicted
+        draw.ellipse([px - r, py - r, px + r, py + r], fill=kpt_col, outline=(0, 0, 0))      # predicted
+        if right_amodal is not None and bool(right_amodal[k]):
+            draw.ellipse([px - rb, py - rb, px + rb, py + rb], fill=(0, 0, 0))
     arr = np.asarray(pil).astype(np.float32) / 255.0
     return torch.from_numpy(arr).permute(2, 0, 1)
 
@@ -289,12 +295,26 @@ class CamCrsp3DNNTask(OD3D_Task):
 
         def _frames_with_bbox(rgb, bbox3d, intr, pose_ncds):
             frames = list(rgb) if rgb is not None else None
-            if frames is not None and all(x is not None for x in (bbox3d, intr, pose_ncds)):
-                from o3b.cv.visual.draw import batch_draw_bbox3d
-                bbox3d = bbox3d.float().reshape(-1, 3)
-                denom = bbox3d.max(dim=1, keepdim=True).values.clamp(min=1e-6)
-                bbox3d_ncds = bbox3d * (_OBJ_SIZE_NCDS / denom)
+            if frames is None or bbox3d is None or intr is None:
+                return frames
+            bbox3d_f = bbox3d.float()
+            if bbox3d_f.dim() == 3 and bbox3d_f.shape[1:] == (8, 3):
+                # (B, 8, 3) cam-space corners — project and draw directly
                 try:
+                    from o3b.cv.visual.draw import draw_bbox3d_corners
+                    for b_i in range(len(frames)):
+                        frames[b_i] = draw_bbox3d_corners(
+                            frames[b_i], bbox3d_f[b_i], intr[b_i], thickness=2,
+                        ).float().div(255.0)
+                except Exception:
+                    pass
+            elif pose_ncds is not None:
+                # (B, 3) NCDS side lengths — normalize and use batch_draw_bbox3d
+                try:
+                    from o3b.cv.visual.draw import batch_draw_bbox3d
+                    bbox3d_r = bbox3d_f.reshape(-1, 3)
+                    denom = bbox3d_r.max(dim=1, keepdim=True).values.clamp(min=1e-6)
+                    bbox3d_ncds = bbox3d_r * (_OBJ_SIZE_NCDS / denom)
                     frames = batch_draw_bbox3d(frames, bbox3d_ncds, intr, pose_ncds.float(), thickness=2)
                 except Exception:
                     frames = list(rgb)

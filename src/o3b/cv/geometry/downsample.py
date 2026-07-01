@@ -11,16 +11,21 @@ def fps(pts3d, K, fill=True):
     if len(pts3d) > 0:
         pts_vals[:] = pts3d[0]
 
-    # from pytorch3d.ops import sample_farthest_points
-    # pts_vals_sampled, pts_inds_sampled = sample_farthest_points(points=pts3d[None,], K=K)
-    # pts_vals_sampled = pts_vals_sampled[0]
-    # pts_inds_sampled = pts_inds_sampled[0]
-
-    from torch_cluster import fps
-
-    # pip install torch-cluster -f https://data.pyg.org/whl/torch-2.0.1+cu117.html
-    pts_inds_sampled = fps(pts3d, ratio=sample_count / len(pts3d))
-    pts_vals_sampled = pts3d[pts_inds_sampled]
+    try:
+        from torch_cluster import fps as _tc_fps
+        pts_inds_sampled = _tc_fps(pts3d, ratio=sample_count / len(pts3d))
+        pts_vals_sampled = pts3d[pts_inds_sampled]
+    except ImportError:
+        try:
+            from pytorch3d.ops import sample_farthest_points
+            pts_vals_sampled, pts_inds_sampled = sample_farthest_points(
+                points=pts3d[None,], K=sample_count
+            )
+            pts_vals_sampled = pts_vals_sampled[0]
+            pts_inds_sampled = pts_inds_sampled[0]
+        except ImportError:
+            pts_inds_sampled = torch.randperm(len(pts3d), device=pts3d.device)[:sample_count]
+            pts_vals_sampled = pts3d[pts_inds_sampled]
 
     sample_count = min(sample_count, len(pts_inds_sampled))
 

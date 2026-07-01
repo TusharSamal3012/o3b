@@ -61,42 +61,60 @@ class HarmonicEmbedding(nn.Module):
 class CoordMLP(MLP):
     def __init__(
         self,
-        in_dims: List=None,
-        in_dim=None,
-        symmetrize=True,
-        query_dim=3,
-        n_harmonic_functions=10,
-        embedder_scalar=2.8274,  # 2 * np.pi / 2 * 0.9  # originally (-0.5*s, 0.5*s) rescale to (-pi, pi) * 0.9
-        embed_concat_pts=True,
+        in_dims: List = None,
+        in_dim = None,
+        in_upsample_scales: List = None,   # ignored; accepted for od3d API compatibility
+        config: DictConfig = None,         # MLP config: num_layers, hidden_dim, out_dim, dropout, activation, symmetrize
+        symmetrize = None,
+        query_dim = 3,
+        n_harmonic_functions = 10,
+        embedder_scalar = 2.8274,
+        embed_concat_pts = True,
     ):
-        if in_dims is not None:
-            feat_dim = in_dims[-1]
+        # Extract MLP params from config dict if provided (od3d-style API)
+        if config is not None:
+            num_layers  = config.get("num_layers",  5)
+            hidden_dim  = config.get("hidden_dim",  256)
+            out_dim     = config.get("out_dim",     None)
+            dropout     = config.get("dropout",     0)
+            activation  = config.get("activation",  None)
+            if symmetrize is None:
+                symmetrize = config.get("symmetrize", True)
         else:
-            feat_dim = in_dim
+            num_layers, hidden_dim, out_dim, dropout, activation = 5, 256, None, 0, None
+
+        if symmetrize is None:
+            symmetrize = True
+
+        feat_dim = in_dims[-1] if in_dims is not None else (in_dim or 0)
 
         if n_harmonic_functions > 0:
-            self.embed_dim = query_dim * 2 * n_harmonic_functions
-            self.embed_concat_pts = embed_concat_pts
+            embed_dim = query_dim * 2 * n_harmonic_functions
             if embed_concat_pts:
-                self.embed_dim += 3
+                embed_dim += query_dim
         else:
-            self.embed_dim = query_dim
-        self.symmetrize = symmetrize
+            embed_dim = query_dim
 
-        self.mlp_in_dim = feat_dim + self.embed_dim
-        if in_dims is not None:
-            in_dims = [self.mlp_in_dim]
-        else:
-            config.update({"in_dim": self.mlp_in_dim})
-            # config.in_dim = self.mlp_in_dim
+        mlp_in_dim = feat_dim + embed_dim
+
+        # nn.Module.__init__ must happen before any nn.Module is assigned as attribute
+        super().__init__(
+            in_dim=mlp_in_dim,
+            num_layers=num_layers,
+            hidden_dim=hidden_dim,
+            out_dim=out_dim,
+            dropout=dropout,
+            activation=activation,
+        )
+
+        self.embed_dim = embed_dim
+        self.embed_concat_pts = embed_concat_pts
+        self.symmetrize = symmetrize
 
         if n_harmonic_functions > 0:
             self.embedder = HarmonicEmbedding(n_harmonic_functions, embedder_scalar)
-
         else:
             self.embedder = None
-
-        super().__init__(in_dims=in_dims)
 
     def forward(self, frames_gt, frames_pred=None):
 

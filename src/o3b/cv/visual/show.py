@@ -22,8 +22,8 @@ from o3b.cv.geometry.transform import tform4x4, inv_tform4x4
 CAM_TFORM_OBJ = torch.Tensor(
     [
         [1.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, -1.0, 0.0],
         [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ],
 )

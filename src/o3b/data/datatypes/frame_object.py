@@ -12,7 +12,7 @@ from o3b.data.datatypes.object import Object
 class FrameObject(Frame, Object):
     frame_object_id:  str
     cam_bbox2d:       Optional[Tensor] = None  # (4,)     xyxy pixels
-    cam_bbox3d:       Optional[Tensor] = None  # (3,) obj-space side lengths for draw_bbox3d, or (8, 3) cam-space corners
+    cam_bbox3d:       Optional[Tensor] = None  # (8, 3)   bounding-box corners in camera space
     fo_mask:          Optional[Tensor] = None  # (H, W)   bool  object-instance mask
     obj_kpts2d_mask:  Optional[Tensor] = None  # (K,)     bool  keypoint visible in this frame (occlusion-aware)
     cam_tform4x4_obj:      Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
@@ -75,6 +75,13 @@ class FrameObject(Frame, Object):
             layers["cam_bbox2d"] = ("draw_bbox", self.cam_bbox2d.cpu())
 
         if (self.cam_bbox3d is not None
+                and self.cam_intr4x4 is not None
+                and self.cam_bbox3d.shape == torch.Size([8, 3])):
+            layers["cam_bbox3d"] = ("draw_bbox3d_corners", (
+                self.cam_bbox3d.cpu(),
+                self.cam_intr4x4.cpu(),
+            ))
+        elif (self.cam_bbox3d is not None
                 and self.cam_intr4x4 is not None
                 and self.cam_tform4x4_obj is not None
                 and self.cam_bbox3d.shape == torch.Size([3])):
@@ -145,12 +152,20 @@ class FrameObject(Frame, Object):
                     pass
 
             if "cam_bbox3d" in layers and active.get("cam_bbox3d", True):
-                from o3b.cv.visual.draw import draw_bbox3d
+                kind_bbox, data_bbox = layers["cam_bbox3d"]
                 try:
-                    obj_size3d, cam_intr4x4, cam_tform4x4_obj = layers["cam_bbox3d"][1]
-                    canvas_t = draw_bbox3d(
-                        canvas_t, obj_size3d, cam_intr4x4, cam_tform4x4_obj,
-                    ).float().div(255.0)
+                    if kind_bbox == "draw_bbox3d_corners":
+                        from o3b.cv.visual.draw import draw_bbox3d_corners
+                        corners_cam, cam_intr4x4 = data_bbox
+                        canvas_t = draw_bbox3d_corners(
+                            canvas_t, corners_cam, cam_intr4x4,
+                        ).float().div(255.0)
+                    else:
+                        from o3b.cv.visual.draw import draw_bbox3d
+                        obj_size3d, cam_intr4x4, cam_tform4x4_obj = data_bbox
+                        canvas_t = draw_bbox3d(
+                            canvas_t, obj_size3d, cam_intr4x4, cam_tform4x4_obj,
+                        ).float().div(255.0)
                 except Exception:
                     pass
 
@@ -218,6 +233,124 @@ class FrameObject(Frame, Object):
 
         canvas = _compose_numpy()
         return torch.from_numpy(canvas).permute(2, 0, 1)
+
+    def viz3d(self, max_pts: int = 50_000) -> Optional[object]:
+        """Build a wandb.Object3D with colored point cloud, mesh verts, and bbox.
+
+        Contents (all in CV camera space — X right, Y down, +Z forward):
+          - colored 3-D point cloud unprojected from depth (filtered by fo_mask)
+          - mesh vertices transformed to camera space (if mesh is present)
+          - 3-D bounding box from cam_bbox3d + cam_tform4x4_obj
+
+        Returns None when no geometry is available or wandb is not installed.
+        """
+        try:
+            import wandb
+        except ImportError:
+            return None
+
+        import numpy as np
+        from o3b.cv.geometry.transform import depth2pts3d_grid, transf3d_broadcast
+
+        pts_xyz: list = []
+        pts_rgb: list = []
+        boxes:   list = []
+
+        tform = self.cam_tform4x4_obj
+
+        # ── 1. Colored point cloud from depth ─────────────────────────────────
+        if self.depth is not None and self.cam_intr4x4 is not None:
+            depth = self.depth.float().cpu()           # (H, W)
+            intr  = self.cam_intr4x4.float().cpu()     # (4, 4)
+
+            # depth2pts3d_grid expects (..., 1, H, W)
+            pts3d      = depth2pts3d_grid(depth.unsqueeze(-3), intr, opengl=False)  # (3, H, W)
+            pts3d_flat = pts3d.permute(1, 2, 0).reshape(-1, 3)  # (HW, 3)
+
+            if self.rgb is not None:
+                rgb = self.rgb.float().cpu()
+                if rgb.max() > 1.5:
+                    rgb = rgb / 255.0
+                rgb_flat = (rgb.permute(1, 2, 0).reshape(-1, 3) * 255).byte()  # (HW, 3) uint8
+            else:
+                rgb_flat = torch.full((pts3d_flat.shape[0], 3), 128, dtype=torch.uint8)
+
+            valid = depth.reshape(-1) > 0
+            if self.depth_mask is not None:
+                valid = valid & self.depth_mask.bool().cpu().reshape(-1)
+
+            if self.fo_mask is not None:
+                fo_flat = self.fo_mask.bool().cpu().reshape(-1)
+                obj_mask = valid & fo_flat
+                bg_mask  = valid & ~fo_flat
+
+                if obj_mask.any():
+                    pts_xyz.append(pts3d_flat[obj_mask].numpy().astype(np.float32))
+                    pts_rgb.append(rgb_flat[obj_mask].numpy())
+
+                n_bg = min(int(bg_mask.sum()), max_pts // 4)
+                if n_bg > 0:
+                    idx = torch.where(bg_mask)[0][torch.randperm(int(bg_mask.sum()))[:n_bg]]
+                    pts_xyz.append(pts3d_flat[idx].numpy().astype(np.float32))
+                    pts_rgb.append(rgb_flat[idx].numpy())
+            else:
+                total = int(valid.sum())
+                n = min(total, max_pts)
+                if n > 0:
+                    idx = torch.where(valid)[0][torch.randperm(total)[:n]]
+                    pts_xyz.append(pts3d_flat[idx].numpy().astype(np.float32))
+                    pts_rgb.append(rgb_flat[idx].numpy())
+
+        # ── 2. Mesh vertices in camera space ──────────────────────────────────
+        if self.mesh is not None and tform is not None:
+            verts     = self.mesh.verts.float().cpu()          # (V, 3)
+            verts_cam = transf3d_broadcast(verts, tform.float().cpu())  # (V, 3)
+
+            if self.mesh.vert_colors is not None:
+                vc = (self.mesh.vert_colors.float().cpu().clamp(0, 1) * 255).byte()
+            else:
+                vc = torch.full((len(verts), 3), 200, dtype=torch.uint8)  # light grey
+
+            pts_xyz.append(verts_cam.numpy().astype(np.float32))
+            pts_rgb.append(vc.numpy())
+
+        # ── 3. 3-D bounding box ───────────────────────────────────────────────
+        if self.cam_bbox3d is not None:
+            bbox = self.cam_bbox3d.float().cpu()
+            label = str(self.category) if self.category is not None else "object"
+
+            if bbox.shape == torch.Size([8, 3]):
+                # cam-space corners (8, 3) — standard post-dataset-loading format
+                boxes.append({"corners": bbox.tolist(), "label": label, "color": [255, 165, 0]})
+            elif bbox.shape == torch.Size([3]) and tform is not None:
+                # legacy: side-length (3,) in NCDS space + NCDS→cam tform
+                hx, hy, hz = (bbox / 2).tolist()
+                corners_obj = torch.tensor([
+                    [-hx, -hy, -hz], [ hx, -hy, -hz],
+                    [ hx,  hy, -hz], [-hx,  hy, -hz],
+                    [-hx, -hy,  hz], [ hx, -hy,  hz],
+                    [ hx,  hy,  hz], [-hx,  hy,  hz],
+                ], dtype=torch.float32)
+                corners_cam = transf3d_broadcast(corners_obj, tform.float().cpu())  # (8, 3)
+                boxes.append({"corners": corners_cam.tolist(), "label": label, "color": [255, 165, 0]})
+
+        if not pts_xyz and not boxes:
+            return None
+
+        if pts_xyz:
+            cloud = np.concatenate(
+                [np.concatenate(pts_xyz, axis=0),
+                 np.concatenate(pts_rgb, axis=0).astype(np.float32)],
+                axis=1,
+            )  # (N, 6): xyz rgb 0-255
+        else:
+            cloud = np.zeros((1, 6), dtype=np.float32)
+
+        return wandb.Object3D({
+            "type": "lidar/beta",
+            "points": cloud,
+            "boxes": np.array(boxes, dtype=object),  # wandb calls .tolist() on this
+        })
 
 
 @dataclass
@@ -298,9 +431,9 @@ class FrameObjectPairBatch:
     trgt_meshes:  Optional[list]   = None  # list of B Mesh
     src_category: Optional[Tensor] = None  # (B,) int64
     trgt_category: Optional[Tensor] = None  # (B,) int64
-    # 3-D bounding-box side lengths (obj space) for draw_bbox3d
-    src_cam_bbox3d:  Optional[Tensor] = None  # (B, 3)
-    trgt_cam_bbox3d: Optional[Tensor] = None  # (B, 3)
+    # 3-D bounding-box corners in camera space
+    src_cam_bbox3d:  Optional[Tensor] = None  # (B, 8, 3)
+    trgt_cam_bbox3d: Optional[Tensor] = None  # (B, 8, 3)
 
 
 def collate_frame_object_pairs(
@@ -402,3 +535,80 @@ def collate_frame_objects(
             for s in samples
         ]) if (include is None or "category" in include) else None,
     )
+
+
+def get_frame_object_from_batch(batch, item_id: int, prefix: str = "") -> FrameObject:
+    """Extract a single FrameObject from a batch at the given index.
+
+    Works on FrameObjectBatch (prefix="") and FrameObjectPairBatch
+    (prefix="src_" or "trgt_").  When ``pred_cam_tform4x4_obj`` is present it
+    overrides the GT pose and ``pred_obj_size3d`` is used to compute cam-space
+    bbox corners.  Otherwise ``cam_bbox3d`` (already (8,3) cam-space corners)
+    is used directly.
+    """
+    def _get(key):
+        v = getattr(batch, f"{prefix}{key}", None)
+        if v is None:
+            return None
+        if isinstance(v, torch.Tensor):
+            return v[item_id].cpu()
+        if isinstance(v, list):
+            return v[item_id] if item_id < len(v) else None
+        return None
+
+    pred_pose = _get("pred_cam_tform4x4_obj")
+    cam_tform4x4_obj = pred_pose if pred_pose is not None else _get("cam_tform4x4_obj_ncds")
+
+    cam_bbox3d = None
+    if pred_pose is not None:
+        raw_size = _get("pred_obj_size3d")
+        if raw_size is not None:
+            from o3b.cv.geometry.transform import transf3d_broadcast as _t3d
+            size3d = raw_size.float()
+            L = size3d.max().clamp(min=1e-6)
+            hx, hy, hz = (size3d / L).tolist()  # NCDS half-extents (max axis = 1.0)
+            corners_ncds = torch.tensor([
+                [-hx, -hy, -hz], [ hx, -hy, -hz],
+                [ hx,  hy, -hz], [-hx,  hy, -hz],
+                [-hx, -hy,  hz], [ hx, -hy,  hz],
+                [ hx,  hy,  hz], [-hx,  hy,  hz],
+            ], dtype=torch.float32)
+            cam_bbox3d = _t3d(corners_ncds, pred_pose.float())  # (8, 3)
+    else:
+        raw_bbox = _get("cam_bbox3d")
+        if raw_bbox is not None and raw_bbox.shape == torch.Size([8, 3]):
+            cam_bbox3d = raw_bbox
+
+    return FrameObject(
+        frame_id="",
+        object_id="",
+        frame_object_id=f"{prefix}{item_id}",
+        cam_intr4x4=_get("cam_intr4x4"),
+        rgb=_get("rgb"),
+        depth=_get("depth"),
+        depth_mask=_get("depth_mask"),
+        fo_mask=_get("fo_mask"),
+        cam_bbox3d=cam_bbox3d,
+        cam_tform4x4_obj=cam_tform4x4_obj,
+        obj_kpts3d=_get("obj_kpts3d"),
+        obj_kpts3d_mask=_get("obj_kpts3d_mask"),
+    )
+
+
+def get_frame_object_list_from_batch(batch, prefix: str = "") -> list[FrameObject]:
+    """Extract all FrameObjects from a batch as a list.
+
+    See get_frame_object_from_batch for field/prefix semantics.
+    """
+    B = None
+    for key in ("rgb", "cam_intr4x4", "depth", "fo_mask"):
+        v = getattr(batch, f"{prefix}{key}", None)
+        if isinstance(v, torch.Tensor):
+            B = v.shape[0]
+            break
+        if isinstance(v, list):
+            B = len(v)
+            break
+    if B is None:
+        return []
+    return [get_frame_object_from_batch(batch, i, prefix=prefix) for i in range(B)]

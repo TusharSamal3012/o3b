@@ -1647,6 +1647,16 @@ def _run_bench_run(args) -> None:
     else:
         ds_base = {}
 
+    # ── inject platform config as 'platform:' so ${platform.path_exps} resolves ─
+    try:
+        platform_cfg, _ = _load_platform_config(platform)
+        platform_cfg_resolved = OmegaConf.to_container(
+            OmegaConf.create(platform_cfg), resolve=True
+        )
+        raw["platform"] = platform_cfg_resolved
+    except Exception:
+        pass
+
     # ── collect ablation combinations (Cartesian product across entries) ────────
     if args.ablation:
         combos = _ablation_combinations(args.ablation)

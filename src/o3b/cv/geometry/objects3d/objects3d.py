@@ -77,9 +77,9 @@ class OD3D_Objects3D_Deform(Sequence):
 
     @classmethod
     def get_model(cls, instance_deform_net_config: DictConfig):
-        from o3b.models.model import OD3D_Model
+        from o3b.model.model import build_model
 
-        return OD3D_Model(instance_deform_net_config)
+        return build_model(instance_deform_net_config)
 
     @classmethod
     def from_net_output(cls, net_output: OD3D_ModelData, affine=False):
@@ -165,7 +165,7 @@ class OD3D_Objects3D(abc.ABC, nn.Module):
             ):
                 imgs_feats.featmaps[-1] = img_feats_canonical.detach()
 
-            from o3b.models.heads.coordmlp import CoordMLP
+            from o3b.model.coordmlp.model import CoordMLP
 
             if isinstance(self.instance_deform_net.head, CoordMLP):
                 imgs_feats.pts3d = self.sample(
@@ -210,7 +210,7 @@ class OD3D_Objects3D(abc.ABC, nn.Module):
                     dim=1,
                 )
             elif instance_deform_net_nearest_pt3d == "cat_harmonics":
-                from o3b.models.heads.coordmlp.head import HarmonicEmbedding
+                from o3b.model.coordmlp.model import HarmonicEmbedding
 
                 harmonic_embedding = HarmonicEmbedding(dim=1)
                 imgs_feats.featmaps[-1] = torch.cat(
@@ -220,7 +220,7 @@ class OD3D_Objects3D(abc.ABC, nn.Module):
             elif instance_deform_net_nearest_pt3d == "sole":
                 imgs_feats.featmaps[-1] = nearest_pt3d
             elif instance_deform_net_nearest_pt3d == "sole_harmonics":
-                from o3b.models.heads.coordmlp.head import HarmonicEmbedding
+                from o3b.model.coordmlp.model import HarmonicEmbedding
 
                 harmonic_embedding = HarmonicEmbedding(dim=1)
                 imgs_feats.featmaps[-1] = harmonic_embedding(nearest_pt3d)
