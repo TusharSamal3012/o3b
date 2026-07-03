@@ -144,6 +144,185 @@ def _render_topdown_corr_img(
                              left_amodal=src_amodal, right_amodal=trgt_amodal)
 
 
+# ── correspondence variants ────────────────────────────────────────────────────
+
+def _img_hw(imgs, b):
+    """(H, W) of sample b for a stacked tensor or a per-sample list."""
+    im = imgs[b]
+    return int(im.shape[-2]), int(im.shape[-1])
+
+
+def _pred_featmap2d(batch, src_ncds, kpts_valid):
+    """Variant b: featmap 2D correspondence.
+
+    Per sample: project src keypoints into the src image (GT pose), sample the
+    src featmap at those pixels, find the nearest-neighbour pixel in the trgt
+    featmap (search restricted to the trgt object mask ∧ valid depth), and lift
+    the matched pixel to 3D camera space via the trgt depth map.
+
+    Returns (pred_kpts_cam_t (B,K,3) w/ NaN where unavailable,
+             src_uv (B,K,2), pred_uv (B,K,2)) or (None, None, None).
+    """
+    import torch.nn.functional as F
+    from o3b.cv.geometry.transform import depth2pts3d_grid
+
+    if (batch.src_featmap is None or batch.trgt_featmap is None
+            or batch.src_rgb is None or batch.trgt_depth is None
+            or batch.src_cam_intr4x4 is None or batch.trgt_cam_intr4x4 is None
+            or batch.src_obj_kpts3d is None):
+        return None, None, None
+
+    B, K, _ = batch.src_obj_kpts3d.shape
+    pred_kpts = torch.full((B, K, 3), float("nan"))
+    src_uv_all  = torch.full((B, K, 2), float("nan"))
+    pred_uv_all = torch.full((B, K, 2), float("nan"))
+
+    for b in range(B):
+        try:
+            src_fm  = batch.src_featmap[b].float()   # (F, Hf, Wf)
+            trgt_fm = batch.trgt_featmap[b].float()  # (F, Hf, Wf)
+            Hf, Wf = src_fm.shape[-2:]
+            H_s, W_s = _img_hw(batch.src_rgb, b)
+            trgt_depth = batch.trgt_depth[b].float().cpu()  # (H, W)
+            H_t, W_t = trgt_depth.shape[-2:]
+
+            # 1. src kpts → 2D (image res, GT pose)
+            src_uv = torch.from_numpy(_proj_frame(
+                batch.src_obj_kpts3d[b], src_ncds[b], batch.src_cam_intr4x4[b],
+            )).float()  # (K, 2)
+            src_uv_all[b] = src_uv
+
+            # 2. sample src feats at kpt pixels (featmap res)
+            uf = ((src_uv[:, 0] + 0.5) * Wf / W_s - 0.5).round().long().clamp(0, Wf - 1)
+            vf = ((src_uv[:, 1] + 0.5) * Hf / H_s - 0.5).round().long().clamp(0, Hf - 1)
+            query_feats = src_fm[:, vf, uf].T  # (K, F)
+
+            # 3. search mask on the trgt featmap: object mask ∧ valid depth
+            valid_t = (trgt_depth > 0)
+            if batch.trgt_fo_mask is not None:
+                valid_t = valid_t & batch.trgt_fo_mask[b].bool().cpu()
+            mask_f = F.interpolate(
+                valid_t[None, None].float(), size=(Hf, Wf), mode="nearest",
+            )[0, 0] > 0.5  # (Hf, Wf)
+            if not mask_f.any():
+                mask_f = torch.ones_like(mask_f)
+
+            # 4. NN in feature space (feats are L2-normalised → cosine sim)
+            sim = torch.einsum("kf,fhw->khw", query_feats, trgt_fm)  # (K, Hf, Wf)
+            sim = sim.masked_fill(~mask_f[None], -float("inf"))
+            flat_idx = sim.reshape(K, -1).argmax(dim=1)  # (K,)
+            pv, pu = flat_idx // Wf, flat_idx % Wf
+
+            # 5. featmap pixel → image res
+            pu_img = (pu.float() + 0.5) * W_t / Wf - 0.5
+            pv_img = (pv.float() + 0.5) * H_t / Hf - 0.5
+            pred_uv_all[b] = torch.stack([pu_img, pv_img], dim=1)
+
+            # 6. lift via trgt depth (OpenGL cam space, matching the GT kpts)
+            pts3d = depth2pts3d_grid(
+                trgt_depth[None], batch.trgt_cam_intr4x4[b].float().cpu(), opengl=True,
+            )  # (3, H, W)
+            iu = pu_img.round().long().clamp(0, W_t - 1)
+            iv = pv_img.round().long().clamp(0, H_t - 1)
+            pred_kpts[b] = pts3d[:, iv, iu].T  # (K, 3)
+        except Exception:
+            continue
+
+    return pred_kpts, src_uv_all, pred_uv_all
+
+
+def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt):
+    """Variant c: mesh (barycentric) correspondence.
+
+    Per sample: pose the src/trgt meshes into their camera spaces with the
+    predicted poses, project each query keypoint onto the src mesh surface,
+    express it in barycentric coordinates of its triangle, and evaluate the same
+    triangle + barycentric coordinates on the trgt mesh.
+
+    Requires src and trgt meshes with identical topology (same category mesh).
+    Returns pred_kpts_cam_t (B, K, 3) with NaN where unavailable, or None.
+    """
+    src_meshes  = batch.src_pred_mesh  if batch.src_pred_mesh  is not None else batch.src_meshes
+    trgt_meshes = batch.trgt_pred_mesh if batch.trgt_pred_mesh is not None else batch.trgt_meshes
+    if src_meshes is None or trgt_meshes is None:
+        return None
+
+    import numpy as np
+    from o3b.cv.geometry.transform import transf3d_broadcast
+
+    B, K, _ = query_kpts_cam_q.shape
+    pred_kpts = torch.full((B, K, 3), float("nan"))
+
+    for b in range(B):
+        try:
+            m_src, m_trgt = src_meshes[b], trgt_meshes[b]
+            if m_src is None or m_trgt is None:
+                continue
+            f_src  = m_src.faces.long().cpu()
+            f_trgt = m_trgt.faces.long().cpu()
+            if f_src.shape != f_trgt.shape or len(m_src.verts) != len(m_trgt.verts):
+                continue  # barycentric transfer needs identical topology
+
+            v_src_cam  = transf3d_broadcast(m_src.verts.float().cpu(),  pred_src[b].float().cpu())
+            v_trgt_cam = transf3d_broadcast(m_trgt.verts.float().cpu(), pred_trgt[b].float().cpu())
+
+            import trimesh
+            from trimesh.triangles import points_to_barycentric, barycentric_to_points
+            tm = trimesh.Trimesh(v_src_cam.numpy(), f_src.numpy(), process=False)
+            closest, _dists, face_ids = tm.nearest.on_surface(
+                query_kpts_cam_q[b].detach().cpu().numpy(),
+            )
+            bary = points_to_barycentric(
+                triangles=v_src_cam.numpy()[f_src.numpy()[face_ids]], points=closest,
+            )
+            pred = barycentric_to_points(
+                triangles=v_trgt_cam.numpy()[f_trgt.numpy()[face_ids]], barycentric=bary,
+            )
+            pred_kpts[b] = torch.from_numpy(np.asarray(pred, dtype=np.float32))
+        except Exception:
+            continue
+
+    return pred_kpts
+
+
+def _variant_metrics(pred_kpts_cam_t, gt_kpts_cam_t, kpts_valid, threshold,
+                     src_vis, trgt_vis):
+    """Euclidean dist / PCK@0.1 / modal / amodal PCK for one prediction variant.
+
+    NaN predictions (variant unavailable for that sample) yield NaN aggregates so
+    nan-safe means skip them.  Returns a dict of tensors + per-kpt is_correct.
+    """
+    dev = gt_kpts_cam_t.device
+    pred = pred_kpts_cam_t.to(dev)
+    dist = (pred - gt_kpts_cam_t).norm(dim=-1)                       # (B, K)
+    sample_ok = torch.isfinite(dist).all(dim=1)                      # (B,)
+    n_valid = kpts_valid.float().sum(dim=1).clamp(min=1)
+
+    is_correct = (dist < threshold.unsqueeze(1)) & torch.isfinite(dist)
+    correct = is_correct.float() * kpts_valid.float()
+
+    dist_masked = torch.where(kpts_valid, dist, torch.zeros_like(dist))
+    dist_mean = torch.where(sample_ok, dist_masked.sum(dim=1) / n_valid,
+                            torch.full_like(n_valid, float("nan")))
+    pck = torch.where(sample_ok, correct.sum(dim=1) / n_valid,
+                      torch.full_like(n_valid, float("nan")))
+
+    modal_pck = amodal_pck = None
+    if src_vis is not None and trgt_vis is not None:
+        both_vis    = src_vis.bool().to(dev) & trgt_vis.bool().to(dev)
+        modal_mask  = kpts_valid & both_vis
+        amodal_mask = kpts_valid & ~both_vis
+        n_modal, n_amodal = modal_mask.float().sum(dim=1), amodal_mask.float().sum(dim=1)
+        nan = torch.full_like(n_valid, float("nan"))
+        modal_pck  = torch.where((n_modal  > 0) & sample_ok,
+                                 (correct * modal_mask.float()).sum(dim=1)  / n_modal.clamp(min=1),  nan)
+        amodal_pck = torch.where((n_amodal > 0) & sample_ok,
+                                 (correct * amodal_mask.float()).sum(dim=1) / n_amodal.clamp(min=1), nan)
+
+    return {"dist": dist, "dist_mean": dist_mean, "pck": pck,
+            "modal": modal_pck, "amodal": amodal_pck, "is_correct": is_correct}
+
+
 # ── task ───────────────────────────────────────────────────────────────────────
 
 @register_task("CamCrsp3DNNTask")
@@ -226,43 +405,55 @@ class CamCrsp3DNNTask(OD3D_Task):
             query_kpts_cam_q, cam_target_tform4x4_cam_query.unsqueeze(1),
         )  # (B, K, 3)
 
-        # ── step 4: euclidean error + PCK @ 0.1 * trgt_obj_size ───────────────
-        cam_kpts_trgt_euc_dist = (pred_trgt_kpts_cam_t - gt_trgt_kpts_cam_t).norm(dim=-1)  # (B, K)
+        # ── variant b: featmap 2D correspondence (NN in feature space + depth) ─
+        pred_feat2d_kpts, feat2d_src_uv, feat2d_pred_uv = _pred_featmap2d(
+            batch, src_ncds, kpts_valid,
+        )
+
+        # ── variant c: mesh (barycentric) correspondence ───────────────────────
+        pred_mesh_kpts = _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt)
+
+        # ── metrics: euclidean error + PCK @ 0.1 * trgt_obj_size, per variant ──
         threshold = 0.1 * trgt_obj_size.float().to(dev)  # (B,)
-        is_correct = (cam_kpts_trgt_euc_dist < threshold.unsqueeze(1))
-        correct = is_correct.float() * kpts_valid.float()
-
-        cam_kpts_trgt_euc_dist_mean = (cam_kpts_trgt_euc_dist * kpts_valid.float()).sum(dim=1) / n_valid
-        cam_kpts_trgt_pck01 = correct.sum(dim=1) / n_valid
-
-        # ── PCK split by visibility (needs obj_kpts2d_mask for both sides) ─────
-        # modal  = both query (src) and target (trgt) keypoints visible
-        # amodal = either query or target keypoint occluded
-        modal_pck = amodal_pck = None
         src_vis, trgt_vis = batch.src_obj_kpts2d_mask, batch.trgt_obj_kpts2d_mask
-        if src_vis is not None and trgt_vis is not None:
-            both_vis    = src_vis.bool().to(dev) & trgt_vis.bool().to(dev)   # (B, K)
-            modal_mask  = kpts_valid & both_vis
-            amodal_mask = kpts_valid & ~both_vis
-            n_modal  = modal_mask.float().sum(dim=1)
-            n_amodal = amodal_mask.float().sum(dim=1)
-            nan = torch.full_like(n_modal, float("nan"))
-            modal_pck  = torch.where(n_modal  > 0, (correct * modal_mask.float()).sum(dim=1)  / n_modal.clamp(min=1),  nan)
-            amodal_pck = torch.where(n_amodal > 0, (correct * amodal_mask.float()).sum(dim=1) / n_amodal.clamp(min=1), nan)
+
+        m_pose = _variant_metrics(pred_trgt_kpts_cam_t, gt_trgt_kpts_cam_t,
+                                  kpts_valid, threshold, src_vis, trgt_vis)
 
         quant = FrameObjectPairQuantBatch(
-            cam_kpts_trgt_euc_dist      = cam_kpts_trgt_euc_dist,
+            cam_kpts_trgt_euc_dist      = m_pose["dist"],
             kpts_mask                   = kpts_valid,
-            cam_kpts_trgt_euc_dist_mean = cam_kpts_trgt_euc_dist_mean,
-            cam_kpts_trgt_pck01         = cam_kpts_trgt_pck01,
-            cam_kpts_modal_trgt_pck01   = modal_pck,
-            cam_kpts_amodal_trgt_pck01  = amodal_pck,
+            cam_kpts_trgt_euc_dist_mean = m_pose["dist_mean"],
+            cam_kpts_trgt_pck01         = m_pose["pck"],
+            cam_kpts_modal_trgt_pck01   = m_pose["modal"],
+            cam_kpts_amodal_trgt_pck01  = m_pose["amodal"],
         )
+
+        variant_correct = {"pose": m_pose["is_correct"]}
+        for name, pred in (("featmap2d", pred_feat2d_kpts), ("mesh", pred_mesh_kpts)):
+            if pred is None:
+                continue
+            m = _variant_metrics(pred, gt_trgt_kpts_cam_t, kpts_valid, threshold,
+                                 src_vis, trgt_vis)
+            variant_correct[name] = m["is_correct"]
+            quant.extra[f"cam_kpts_trgt_euc_dist_mean_{name}"] = m["dist_mean"]
+            quant.extra[f"cam_kpts_trgt_pck01_{name}"]         = m["pck"]
+            if m["modal"] is not None:
+                quant.extra[f"cam_kpts_modal_trgt_pck01_{name}"]  = m["modal"]
+                quant.extra[f"cam_kpts_amodal_trgt_pck01_{name}"] = m["amodal"]
 
         if self.qualit and return_qualit:
             qualit = self._render_qualit(
                 batch, query_kpts_cam_q, gt_trgt_kpts_cam_t, pred_trgt_kpts_cam_t,
-                trgt_ncds, kpts_valid, is_correct,
+                trgt_ncds, kpts_valid, m_pose["is_correct"],
+            )
+            self._render_qualit_featmap2d(
+                batch, qualit, src_ncds, feat2d_src_uv, feat2d_pred_uv,
+                kpts_valid, variant_correct.get("featmap2d"),
+            )
+            self._render_qualit_mesh(
+                batch, qualit, src_ncds, trgt_ncds, pred_src, pred_trgt,
+                pred_mesh_kpts, kpts_valid, variant_correct.get("mesh"),
             )
         else:
             qualit = None
@@ -400,3 +591,145 @@ class CamCrsp3DNNTask(OD3D_Task):
             for i in imgs
         ]
         return FrameObjectPairQualitBatch(imgs=torch.stack(imgs))
+
+    # ── qualitative: variant b — featmap PCA correspondence panels ─────────────
+
+    @staticmethod
+    def _featmap_pca_imgs(src_fm, trgt_fm, out_hw_src, out_hw_trgt):
+        """Joint PCA over both featmaps → two (H, W, 3) uint8 images."""
+        import numpy as np
+        import torch.nn.functional as F
+        Fd, Hf, Wf = src_fm.shape
+        flat = torch.cat([
+            src_fm.reshape(Fd, -1).T, trgt_fm.reshape(Fd, -1).T,
+        ], dim=0)  # (2*Hf*Wf, F)
+        with torch.no_grad():
+            _, _, Vt = torch.pca_lowrank(flat, q=3, center=True)
+            proj = flat @ Vt  # (2*Hf*Wf, 3)
+        lo, hi = proj.min(dim=0).values, proj.max(dim=0).values
+        proj = (proj - lo) / (hi - lo + 1e-6)
+        src_pca  = proj[: Hf * Wf].T.reshape(3, Hf, Wf)
+        trgt_pca = proj[Hf * Wf:].T.reshape(3, Hf, Wf)
+        out = []
+        for pca, (H, W) in ((src_pca, out_hw_src), (trgt_pca, out_hw_trgt)):
+            up = F.interpolate(pca[None], size=(H, W), mode="nearest")[0]
+            out.append((up.permute(1, 2, 0).numpy() * 255).astype(np.uint8))
+        return out
+
+    def _render_qualit_featmap2d(
+        self, batch, qualit, src_ncds, feat2d_src_uv, feat2d_pred_uv,
+        kpts_valid, is_correct,
+    ) -> None:
+        """query|target joint-PCA featmap panels with the featmap-NN
+        correspondences drawn on top → qualit.extra['correspondences_featmap2d']."""
+        if (qualit is None or is_correct is None or feat2d_src_uv is None
+                or batch.src_featmap is None or batch.trgt_featmap is None
+                or batch.trgt_cam_intr4x4 is None):
+            return
+        B = kpts_valid.shape[0]
+        imgs = []
+        for b in range(B):
+            try:
+                hw_s = _img_hw(batch.src_rgb, b)
+                hw_t = _img_hw(batch.trgt_rgb, b) if batch.trgt_rgb is not None else hw_s
+                left, right = self._featmap_pca_imgs(
+                    batch.src_featmap[b].float().cpu(),
+                    batch.trgt_featmap[b].float().cpu(), hw_s, hw_t,
+                )
+                gt_uv = _proj_frame(
+                    batch.trgt_obj_kpts3d[b], batch.trgt_cam_tform4x4_obj_ncds[b],
+                    batch.trgt_cam_intr4x4[b],
+                )
+                row = _draw_corr_panels(
+                    left, right,
+                    feat2d_src_uv[b].numpy(), gt_uv, feat2d_pred_uv[b].numpy(),
+                    kpts_valid[b].cpu(), is_correct[b].cpu(),
+                )
+                imgs.append(row)
+            except Exception:
+                continue
+        if imgs:
+            qualit.extra["correspondences_featmap2d"] = imgs
+
+    # ── qualitative: variant c — NOCS-colored mesh correspondence panels ───────
+
+    def _render_qualit_mesh(
+        self, batch, qualit, src_ncds, trgt_ncds, pred_src, pred_trgt,
+        pred_mesh_kpts, kpts_valid, is_correct,
+    ) -> None:
+        """NOCS-colored predicted meshes rendered from the GT viewpoints (row 1)
+        and top-down (row 2), with the mesh-barycentric correspondences drawn on
+        top → qualit.extra['correspondences_mesh']."""
+        if qualit is None or is_correct is None or pred_mesh_kpts is None:
+            return
+        from dataclasses import replace as _dc_replace
+        import torch.nn.functional as F
+        from o3b.cv.geometry.transform import transf3d_broadcast, inv_tform4x4
+        from o3b.cv.visual.point3d_to_color3d import nocs_0c_to_rgb
+
+        src_meshes  = batch.src_pred_mesh  if batch.src_pred_mesh  is not None else batch.src_meshes
+        trgt_meshes = batch.trgt_pred_mesh if batch.trgt_pred_mesh is not None else batch.trgt_meshes
+        if src_meshes is None or trgt_meshes is None:
+            return
+
+        def _nocs_colored(mesh):
+            if mesh is None:
+                return None
+            verts = mesh.verts.float().cpu()
+            return _dc_replace(mesh, vert_colors=nocs_0c_to_rgb(verts).clamp(0, 1))
+
+        def _vstack(rows):
+            rows = [r for r in rows if r is not None]
+            if not rows:
+                return None
+            W = max(r.shape[2] for r in rows)
+            out = []
+            for r in rows:
+                if r.shape[2] != W:
+                    new_h = max(1, int(round(r.shape[1] * W / r.shape[2])))
+                    r = F.interpolate(r.unsqueeze(0), size=(new_h, W), mode="bilinear", align_corners=False)[0]
+                out.append(r)
+            return torch.cat(out, dim=1)
+
+        eye = torch.eye(4)
+        B = kpts_valid.shape[0]
+        imgs = []
+        for b in range(B):
+            try:
+                m_src  = _nocs_colored(src_meshes[b])
+                m_trgt = _nocs_colored(trgt_meshes[b])
+                if m_src is None or m_trgt is None:
+                    continue
+                valid, correct = kpts_valid[b].cpu(), is_correct[b].cpu()
+
+                # ── row 1: GT viewpoints ───────────────────────────────────────
+                gt_row = None
+                if batch.src_cam_intr4x4 is not None and batch.trgt_cam_intr4x4 is not None:
+                    H_s, W_s = _img_hw(batch.src_rgb, b) if batch.src_rgb is not None else (256, 256)
+                    H_t, W_t = _img_hw(batch.trgt_rgb, b) if batch.trgt_rgb is not None else (256, 256)
+                    src_k,  trgt_k  = batch.src_cam_intr4x4[b].float().cpu(), batch.trgt_cam_intr4x4[b].float().cpu()
+                    src_t,  trgt_t  = src_ncds[b].float().cpu(), trgt_ncds[b].float().cpu()
+                    left  = _render_mesh_topdown(m_src,  src_t,  src_k,  H_s, W_s)
+                    right = _render_mesh_topdown(m_trgt, trgt_t, trgt_k, H_t, W_t)
+                    src_uv  = _proj_opengl(batch.src_obj_kpts3d[b],  src_t,  src_k)
+                    gt_uv   = _proj_opengl(batch.trgt_obj_kpts3d[b], trgt_t, trgt_k)
+                    pred_uv = _proj_opengl(pred_mesh_kpts[b], eye, trgt_k)  # already trgt-cam space
+                    gt_row = _draw_corr_panels(left, right, src_uv, gt_uv, pred_uv, valid, correct)
+
+                # ── row 2: top-down ────────────────────────────────────────────
+                pred_kpts_ncds = transf3d_broadcast(
+                    pred_mesh_kpts[b].float(), inv_tform4x4(pred_trgt[b].float().cpu()),
+                )
+                top_row = _render_topdown_corr_img(
+                    m_src, m_trgt,
+                    batch.src_obj_kpts3d[b], batch.trgt_obj_kpts3d[b], pred_kpts_ncds,
+                    valid, correct,
+                )
+
+                combined = _vstack([gt_row, top_row])
+                if combined is not None:
+                    imgs.append(combined)
+            except Exception:
+                continue
+        if imgs:
+            qualit.extra["correspondences_mesh"] = imgs

@@ -24,10 +24,23 @@ class FrameObjectPairQualitBatch:
 
     def to_wandb_log(self, prefix: str = "qualit", wb=None, log_imgs: bool = True) -> dict:
         out: dict = {}
-        if wb is None or not log_imgs or self.imgs is None:
+        if wb is None or not log_imgs:
             return out
-        out[f"{prefix}/correspondences"] = [
-            wb.Image(img.permute(1, 2, 0).detach().cpu().float().numpy(), caption=f"i{i}")
-            for i, img in enumerate(self.imgs)
-        ]
+        if self.imgs is not None:
+            out[f"{prefix}/correspondences"] = [
+                wb.Image(img.permute(1, 2, 0).detach().cpu().float().numpy(), caption=f"i{i}")
+                for i, img in enumerate(self.imgs)
+            ]
+        # extra image groups (e.g. featmap-PCA / mesh-NOCS correspondence panels):
+        # each value is a (B, 3, H, W) tensor or a list of (3, H, W) tensors.
+        for name, imgs in self.extra.items():
+            if imgs is None:
+                continue
+            try:
+                out[f"{prefix}/{name}"] = [
+                    wb.Image(img.permute(1, 2, 0).detach().cpu().float().numpy(), caption=f"i{i}")
+                    for i, img in enumerate(imgs)
+                ]
+            except Exception:
+                pass
         return out

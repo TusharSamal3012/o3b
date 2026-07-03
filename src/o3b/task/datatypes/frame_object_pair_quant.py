@@ -43,7 +43,9 @@ class FrameObjectPairQuantBatch:
                     out[fname] = finite.mean().item()
         for k, v in self.extra.items():
             if v is not None and hasattr(v, "mean"):
-                out[k] = v.mean().item()
+                finite = v.float()[_torch.isfinite(v.float())]
+                if len(finite) > 0:
+                    out[k] = finite.mean().item()
         return out
 
     def to_wandb_log(self, prefix: str = "batch", wb=None) -> dict:

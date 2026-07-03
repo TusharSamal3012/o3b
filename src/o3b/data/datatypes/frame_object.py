@@ -559,6 +559,11 @@ class FrameObjectPairBatch:
     # 3-D bounding-box corners in camera space
     src_cam_bbox3d:  Optional[Tensor] = None  # (B, 8, 3)
     trgt_cam_bbox3d: Optional[Tensor] = None  # (B, 8, 3)
+    # ── predicted features / meshes (filled by a method) ───────────────────────
+    src_featmap:    Optional[Tensor] = None  # (B, F, Hf, Wf) L2-normalised feature maps
+    trgt_featmap:   Optional[Tensor] = None
+    src_pred_mesh:  Optional[list]   = None  # list of B Mesh, canonical (GL) NCDS frame
+    trgt_pred_mesh: Optional[list]   = None
 
 
 def collate_frame_object_pairs(
