@@ -114,11 +114,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             wb_log["batch/n_samples"] = n_samples
             _wb.log(wb_log, step=batch_idx)
 
-        if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(loader):
-            print(f"  [{batch_idx + 1:4d}/{len(loader)}]  samples={n_samples}", end="")
-            for k, vals in accum.items():
-                print(f"  {k}={sum(vals)/len(vals):.4f}", end="")
-            print()
+        bar.set_postfix({"samples": n_samples,
+                         **{k: round(sum(v) / len(v), 4) for k, v in accum.items()}})
 
     print(f"\n{'─'*50}")
     print(f"Results  ({n_samples} samples)")

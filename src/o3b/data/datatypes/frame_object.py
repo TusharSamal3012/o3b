@@ -18,20 +18,26 @@ class FrameObject(Frame, Object):
     cam_tform4x4_obj:      Optional[Tensor] = None  # (4, 4)  cam←obj SE(3)
     cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (4, 4)  ncds→cam (= cam_tform4x4_obj @ obj_ncds0c_tform4x4_obj)
 
-    def viz(self, show: bool = True) -> Optional[Tensor]:
-        """Interactive overlay viewer with CheckButtons to toggle modalities.
+    def viz(self, show: bool = True, server=None, node_prefix: str = "",
+            offset_x: float = 0.0, obj_centric: bool = False, kpt_colors=None):
+        """Visualise this frame-object.
 
-        Layers are composited onto a single canvas:
-          rgb        – base image
-          fo_mask    – green semi-transparent instance mask
-          depth      – plasma colourmap overlay
-          depth_mask – blue semi-transparent depth-validity mask
-          frame_mask – orange semi-transparent frame mask
-          cam_bbox2d – yellow 2-D bounding box (draw_bbox)
-          cam_bbox3d – 3-D bounding box projected via draw_bbox3d
+        server=None (default): interactive 2-D overlay viewer with CheckButtons
+          to toggle modalities (rgb, fo_mask, depth, depth_mask, frame_mask,
+          cam_bbox2d/3d, keypoints); returns the composed (3, H, W) tensor.
 
-        Returns the composed (3, H, W) tensor in [0, 1].
+        server given (a viser server): add the frame-object to the 3-D scene
+          (mesh, camera frustum, rgb panel, depth point cloud, camera + object
+          axes, keypoint spheres) under *node_prefix*, translated by *offset_x*
+          along world X; returns the list of viser handles.
         """
+        if server is not None:
+            from o3b.dataset.housecorr3d.frame_dataset import _add_frame_object_to_scene
+            return _add_frame_object_to_scene(
+                server, self, prefix=node_prefix, offset_x=offset_x,
+                obj_centric=obj_centric, kpt_colors=kpt_colors,
+            )
+
         import numpy as np
 
         layers: dict[str, tuple] = {}
@@ -235,12 +241,23 @@ class FrameObject(Frame, Object):
         return torch.from_numpy(canvas).permute(2, 0, 1)
 
     def viz3d(self, max_pts: int = 50_000) -> Optional[object]:
-        """Build a wandb.Object3D with colored point cloud, mesh verts, and bbox.
+        """Build a wandb.Object3D with colored point cloud, mesh, and bbox.
 
-        Contents (all in CV camera space — X right, Y down, +Z forward):
+        Contents (all in OpenGL camera space — X right, Y up, -Z forward, to match
+        cam_tform4x4_obj which is stored in the OpenGL convention):
           - colored 3-D point cloud unprojected from depth (filtered by fo_mask)
-          - mesh vertices transformed to camera space (if mesh is present)
+          - mesh transformed to camera space (if mesh is present)
           - 3-D bounding box from cam_bbox3d + cam_tform4x4_obj
+
+        When the mesh has faces (and trimesh is available) everything is exported
+        as a GLB scene so the mesh renders as an actual surface, the depth points
+        as a colored point cloud, and the bbox as orange cylinder edges.
+        Otherwise falls back to a wandb lidar point cloud with the mesh verts as
+        points and the bbox as wandb box corners.
+
+        The point cloud is downsampled by a factor of 4, and the whole scene is
+        median-centered and quantile-scaled so that 80% of the points lie inside
+        [-1, 1]³ (the same center/scale is applied to mesh and bbox).
 
         Returns None when no geometry is available or wandb is not installed.
         """
@@ -263,8 +280,9 @@ class FrameObject(Frame, Object):
             depth = self.depth.float().cpu()           # (H, W)
             intr  = self.cam_intr4x4.float().cpu()     # (4, 4)
 
-            # depth2pts3d_grid expects (..., 1, H, W)
-            pts3d      = depth2pts3d_grid(depth.unsqueeze(-3), intr, opengl=False)  # (3, H, W)
+            # depth2pts3d_grid expects (..., 1, H, W).  opengl=True so the point cloud
+            # matches cam_tform4x4_obj (OpenGL, -Z forward) used to place the mesh/bbox.
+            pts3d      = depth2pts3d_grid(depth.unsqueeze(-3), intr, opengl=True)  # (3, H, W)
             pts3d_flat = pts3d.permute(1, 2, 0).reshape(-1, 3)  # (HW, 3)
 
             if self.rgb is not None:
@@ -301,18 +319,61 @@ class FrameObject(Frame, Object):
                     pts_xyz.append(pts3d_flat[idx].numpy().astype(np.float32))
                     pts_rgb.append(rgb_flat[idx].numpy())
 
-        # ── 2. Mesh vertices in camera space ──────────────────────────────────
+        # ── 1b. Downsample the point cloud by a factor of 4 ──────────────────
+        if pts_xyz:
+            pts_all = np.concatenate(pts_xyz, axis=0).astype(np.float32)
+            rgb_all = np.concatenate(pts_rgb, axis=0)
+            keep = np.random.permutation(len(pts_all))[: max(1, len(pts_all) // 4)]
+            pts_xyz = [pts_all[keep]]
+            pts_rgb = [rgb_all[keep]]
+
+        # ── 1c. Median centering + quantile scaling ──────────────────────────
+        # Normalise the whole scene so 80% of the points lie inside [-1, 1]³:
+        # center = per-axis median, scale = 0.8-quantile of the per-point
+        # max-abs coordinate after centering.  The same (center, scale) is
+        # applied to mesh verts and bbox corners to keep everything aligned.
+        norm_center = np.zeros(3, dtype=np.float32)
+        norm_scale  = 1.0
+        if pts_xyz and len(pts_xyz[0]) > 0:
+            _p = pts_xyz[0]
+            norm_center = np.median(_p, axis=0).astype(np.float32)
+            _d = np.abs(_p - norm_center).max(axis=1)
+            _s = float(np.quantile(_d, 0.8))
+            norm_scale = _s if _s > 1e-6 else 1.0
+            pts_xyz = [((_p - norm_center) / norm_scale).astype(np.float32)]
+
+        def _normalize(x: "torch.Tensor") -> "torch.Tensor":
+            c = torch.from_numpy(norm_center).to(dtype=x.dtype)
+            return (x - c) / norm_scale
+
+        # ── 2. Mesh in camera space ───────────────────────────────────────────
+        # Preferred: an actual triangle mesh (rendered via a GLB scene below).
+        # Fallback (no faces / no trimesh): mesh verts as extra points.
+        mesh_tm  = None
+        verts_cam = None
+        mesh_vc   = None
         if self.mesh is not None and tform is not None:
             verts     = self.mesh.verts.float().cpu()          # (V, 3)
             verts_cam = transf3d_broadcast(verts, tform.float().cpu())  # (V, 3)
+            verts_cam = _normalize(verts_cam)
 
             if self.mesh.vert_colors is not None:
-                vc = (self.mesh.vert_colors.float().cpu().clamp(0, 1) * 255).byte()
+                mesh_vc = (self.mesh.vert_colors.float().cpu().clamp(0, 1) * 255).byte()
             else:
-                vc = torch.full((len(verts), 3), 200, dtype=torch.uint8)  # light grey
+                mesh_vc = torch.full((len(verts), 3), 200, dtype=torch.uint8)  # light grey
 
-            pts_xyz.append(verts_cam.numpy().astype(np.float32))
-            pts_rgb.append(vc.numpy())
+            faces = getattr(self.mesh, "faces", None)
+            if faces is not None and len(faces) > 0:
+                try:
+                    import trimesh
+                    mesh_tm = trimesh.Trimesh(
+                        vertices=verts_cam.numpy().astype(np.float64),
+                        faces=faces.long().cpu().numpy(),
+                        vertex_colors=mesh_vc.numpy(),
+                        process=False,
+                    )
+                except ImportError:
+                    mesh_tm = None
 
         # ── 3. 3-D bounding box ───────────────────────────────────────────────
         if self.cam_bbox3d is not None:
@@ -321,7 +382,8 @@ class FrameObject(Frame, Object):
 
             if bbox.shape == torch.Size([8, 3]):
                 # cam-space corners (8, 3) — standard post-dataset-loading format
-                boxes.append({"corners": bbox.tolist(), "label": label, "color": [255, 165, 0]})
+                corners_norm = _normalize(bbox)
+                boxes.append({"corners": corners_norm.tolist(), "label": label, "color": [255, 165, 0]})
             elif bbox.shape == torch.Size([3]) and tform is not None:
                 # legacy: side-length (3,) in NCDS space + NCDS→cam tform
                 hx, hy, hz = (bbox / 2).tolist()
@@ -332,7 +394,70 @@ class FrameObject(Frame, Object):
                     [ hx,  hy,  hz], [-hx,  hy,  hz],
                 ], dtype=torch.float32)
                 corners_cam = transf3d_broadcast(corners_obj, tform.float().cpu())  # (8, 3)
+                corners_cam = _normalize(corners_cam)
                 boxes.append({"corners": corners_cam.tolist(), "label": label, "color": [255, 165, 0]})
+
+        # ── 4. Preferred: GLB scene — mesh as a real surface + point cloud + bbox ─
+        if mesh_tm is not None:
+            try:
+                import tempfile
+                import trimesh
+                scene = trimesh.Scene()
+                scene.add_geometry(mesh_tm, node_name="mesh")
+                if pts_xyz:
+                    # GLTF POINTS primitives don't render vertex colors reliably in
+                    # the wandb (Babylon.js) viewer → bake each point as a tiny
+                    # triangle splat instead; triangles always render with COLOR_0.
+                    pts  = np.concatenate(pts_xyz, axis=0).astype(np.float64)  # (N, 3)
+                    cols = np.concatenate(pts_rgb, axis=0).astype(np.uint8)    # (N, 3)
+                    N = pts.shape[0]
+                    diag = float(np.linalg.norm(pts.max(0) - pts.min(0))) if N > 1 else 1.0
+                    r = max(diag * 0.0015, 1e-5)
+                    # fixed-orientation equilateral triangle around each point
+                    offsets = np.array([
+                        [ 0.0,   r,  0.0],
+                        [-r * 0.866, -r * 0.5, 0.0],
+                        [ r * 0.866, -r * 0.5, 0.0],
+                    ], dtype=np.float64)  # (3, 3)
+                    splat_verts = (pts[:, None, :] + offsets[None]).reshape(-1, 3)   # (3N, 3)
+                    splat_faces = np.arange(3 * N, dtype=np.int64).reshape(-1, 3)    # (N, 3)
+                    splat_cols  = np.repeat(cols, 3, axis=0)                          # (3N, 3)
+                    scene.add_geometry(
+                        trimesh.Trimesh(
+                            vertices=splat_verts,
+                            faces=splat_faces,
+                            vertex_colors=splat_cols,
+                            process=False,
+                        ),
+                        node_name="pointcloud",
+                    )
+                # bbox wireframe as thin cylinders (guaranteed to render as geometry)
+                EDGES = [(0, 1), (1, 2), (2, 3), (3, 0),
+                         (4, 5), (5, 6), (6, 7), (7, 4),
+                         (0, 4), (1, 5), (2, 6), (3, 7)]
+                for box in boxes:
+                    c = np.asarray(box["corners"], dtype=np.float64)
+                    diag = float(np.linalg.norm(c.max(0) - c.min(0)))
+                    r = max(diag * 0.004, 1e-4)
+                    for i, j in EDGES:
+                        if np.linalg.norm(c[j] - c[i]) < 1e-8:
+                            continue
+                        cyl = trimesh.creation.cylinder(
+                            radius=r, segment=np.stack([c[i], c[j]]), sections=6,
+                        )
+                        cyl.visual.face_colors = [255, 165, 0, 255]
+                        scene.add_geometry(cyl)
+                f = tempfile.NamedTemporaryFile(suffix=".glb", delete=False)
+                f.write(scene.export(file_type="glb"))
+                f.close()
+                return wandb.Object3D.from_file(f.name)
+            except Exception:
+                pass  # fall through to the lidar point-cloud representation
+
+        # ── fallback: lidar point cloud (mesh verts as points) ───────────────
+        if verts_cam is not None:
+            pts_xyz.append(verts_cam.numpy().astype(np.float32))
+            pts_rgb.append(mesh_vc.numpy())
 
         if not pts_xyz and not boxes:
             return None
@@ -590,6 +715,7 @@ def get_frame_object_from_batch(batch, item_id: int, prefix: str = "") -> FrameO
         fo_mask=_get("fo_mask"),
         cam_bbox3d=cam_bbox3d,
         cam_tform4x4_obj=cam_tform4x4_obj,
+        mesh=_get("pred_mesh"),
         obj_kpts3d=_get("obj_kpts3d"),
         obj_kpts3d_mask=_get("obj_kpts3d_mask"),
     )

@@ -32,6 +32,7 @@ modalities:
   - cam_bbox2d
   - cam_bbox3d
   - obj_kpts3d
+  - obj_bbox3d
   - obj_kpts3d_mask
   - obj_kpts2d_mask
   - category

@@ -713,14 +713,14 @@ def get_cam_tform4x4_obj_for_viewpoints_count(
 
         elif viewpoints_count == 3:
             # front, top, right
-            azim = torch.Tensor([0.0, 0.0, -math.pi / 2.0])
+            azim = torch.Tensor([0.0, math.pi, -math.pi / 2.0])
             elev = torch.Tensor([0.0, math.pi / 2.0 - 0.01, 0.0])
-            theta = torch.Tensor([0.0, 0.0, 0.0])
+            theta = torch.Tensor([0.0, math.pi, 0.0])
         elif viewpoints_count == 4:
             # front, top, right, bottom
-            azim = torch.Tensor([0.0, 0.0, -math.pi / 2.0, 0.0])
+            azim = torch.Tensor([0.0, math.pi, -math.pi / 2.0, 0.0])
             elev = torch.Tensor([0.0, math.pi / 2.0 - 0.01, 0.0, -math.pi / 2.0 + 0.01])
-            theta = torch.Tensor([0.0, 0.0, 0.0, 0.0])
+            theta = torch.Tensor([0.0, math.pi, 0.0, 0.0])
         else:
             viewpoints_count_sqrt = math.ceil(math.sqrt(viewpoints_count))
             range_max = 1.0 - 1.0 / viewpoints_count_sqrt
@@ -811,7 +811,7 @@ def get_cam_front_back_top_tform4x4_obj(device=None, dist=0.):
 
 def get_cam_front_top_right_tform4x4_cam(device=None, dist=0.):
     # note: front from object, top from object, right from object
-    azim = torch.Tensor([0.0, -math.pi, -math.pi / 2.0])
+    azim = torch.Tensor([0.0, math.pi, -math.pi / 2.0])
     elev = torch.Tensor([0.0, math.pi / 2.0 - 0.01, 0.0])
     theta = torch.Tensor([0.0, 0., 0.0])
 
@@ -1199,6 +1199,45 @@ def get_ico_cam_tform4x4_obj_for_viewpoints_count(
     # R, t = look_at_view_transform(dist, elev=elev_s, azim=azim_s, degrees=False)
 
     # return 0.
+
+
+# ── unified viewpoint entry point ─────────────────────────────────────────────
+
+# All cam_tform4x4_obj viewpoint generators in this module, keyed by name. The
+# `..._cam` variants return cam_tform4x4_cam (camera-relative) rather than
+# cam_tform4x4_obj — see the individual functions.
+CAM_TFORM4X4_OBJ_VIEWPOINT_FNS = {
+    "viewpoints_count":    get_cam_tform4x4_obj_for_viewpoints_count,      # viewpoints_count, dist, spiral, device, dtype
+    "spherical_uniform":   get_spherical_uniform_tform4x4,                 # azim_min/max/steps, elev_min/max/steps, dist, ...
+    "spherical":           transf4x4_from_spherical,                       # azim, elev, theta, dist
+    "front_back_top":      get_cam_front_back_top_tform4x4_obj,            # device, dist
+    "ico":                 get_ico_cam_tform4x4_obj_for_viewpoints_count,  # viewpoints_count, radius, theta_count, ...
+    "ico_traj":            get_ico_traj_cam_tform4x4_obj_for_viewpoints_count,  # viewpoints_count, radius, theta_count, geodesic_distance, ...
+    "front_top_right_cam": get_cam_front_top_right_tform4x4_cam,           # device, dist  (returns cam_tform4x4_cam)
+    "front_back_top_cam":  get_cam_front_back_top_tform4x4_cam,            # device, dist  (returns cam_tform4x4_cam)
+}
+
+
+def get_cam_tform4x4_obj_viewpoints(method: str = "viewpoints_count", **kwargs):
+    """Unified entry point for the cam_tform4x4_obj viewpoint generators.
+
+    Args:
+        method: which generator to use, one of CAM_TFORM4X4_OBJ_VIEWPOINT_FNS —
+            "viewpoints_count" | "spherical_uniform" | "spherical" |
+            "front_back_top" | "ico" | "ico_traj" |
+            "front_top_right_cam" | "front_back_top_cam".
+        **kwargs: forwarded verbatim to the selected generator (front/right/top,
+            uniform, spherical or from-viewpoint-count all share this signature).
+
+    Returns:
+        (V, 4, 4) cam_tform4x4_obj (or cam_tform4x4_cam for the "..._cam" methods).
+    """
+    if method not in CAM_TFORM4X4_OBJ_VIEWPOINT_FNS:
+        raise ValueError(
+            f"Unknown viewpoint method {method!r}. "
+            f"Available: {sorted(CAM_TFORM4X4_OBJ_VIEWPOINT_FNS)}"
+        )
+    return CAM_TFORM4X4_OBJ_VIEWPOINT_FNS[method](**kwargs)
 
 
 @torch.jit.script

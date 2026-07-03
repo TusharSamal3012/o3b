@@ -175,9 +175,20 @@ class DenseMatcher(ConfigurableDataset):
             category                = category,
             category_id             = category_id,
         )
-        if self.cfg.obj_tform4x4 is not None:
+        if self.cfg.obj_gl_tform4x4_obj_raw is not None:
             import torch as _torch
-            obj = obj.transform(_torch.tensor(self.cfg.obj_tform4x4, dtype=_torch.float32))
+            from dataclasses import replace as _r
+            T = _torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=_torch.float32)
+            # transform() rotates verts/kpts by T and updates M → M @ inv(T).
+            obj = obj.transform(T)
+            # Apply T on the *other* side too, so M → T @ M @ inv(T) (both sides),
+            # rotating the metric object frame into the canonical orientation.
+            # Matches HouseCorr3D._load_object_from_row.
+            if obj.obj_ncds0c_tform4x4_obj is not None:
+                obj = _r(
+                    obj,
+                    obj_ncds0c_tform4x4_obj=T @ obj.obj_ncds0c_tform4x4_obj.float(),
+                )
         return obj
 
     def _load_object_pair(self, idx: int) -> ObjectPair:

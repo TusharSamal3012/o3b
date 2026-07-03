@@ -17,7 +17,7 @@ Six buttons let you modify the current axis assignment interactively:
     Flip Top-Back      — negate both Top   and Back  vectors
     Flip Back-Right    — negate both Back  and Right vectors
 
-The resulting obj_tform4x4 is displayed in YAML format, ready to paste
+The resulting obj_gl_tform4x4_obj_raw is displayed in YAML format, ready to paste
 into the dataset config.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ import numpy as np
 # ── tform helpers ─────────────────────────────────────────────────────────────
 
 def _tform_from_axes(right: np.ndarray, top: np.ndarray, back: np.ndarray) -> np.ndarray:
-    """Build a 4×4 obj_tform4x4 from the three semantic direction vectors.
+    """Build a 4×4 obj_gl_tform4x4_obj_raw from the three semantic direction vectors.
 
     Rows of T[:3,:3] are the semantic directions in object space:
         row 0 = right  (maps to canonical X)
@@ -46,7 +46,7 @@ def _tform_from_axes(right: np.ndarray, top: np.ndarray, back: np.ndarray) -> np
 
 
 def _tform_to_yaml(T: np.ndarray) -> str:
-    lines = ["# rows: right, top, back → X, Y, Z (canonical)", "obj_tform4x4:"]
+    lines = ["# rows: right, top, back → X, Y, Z (canonical)", "obj_gl_tform4x4_obj_raw:"]
     for row in T:
         lines.append("  - [" + ", ".join(f"{v:8.5f}" for v in row) + "]")
     return "\n".join(lines)
@@ -100,7 +100,7 @@ def _load_meshes(cls, cfg, limit: int) -> list[tuple[str, object]]:
     view_cfg = deepcopy(cfg)
     view_cfg.item_type         = ItemType.OBJECT
     view_cfg.object_modalities = {"mesh"}
-    view_cfg.obj_tform4x4      = None   # show untransformed mesh
+    view_cfg.obj_gl_tform4x4_obj_raw      = None   # show untransformed mesh
     view_cfg.filter_count_max  = limit
 
     try:
@@ -240,7 +240,7 @@ def run_tform_viewer(cls, cfg, limit: int = 20) -> None:
         b_fl_t   = server.gui.add_button("Flip Top")
         b_fl_b   = server.gui.add_button("Flip Back")
         txt_det   = server.gui.add_text("determinant", initial_value="")
-        txt_tform = server.gui.add_text("obj_tform4x4 (YAML)", initial_value="")
+        txt_tform = server.gui.add_text("obj_gl_tform4x4_obj_raw (YAML)", initial_value="")
 
     @b_prev.on_click
     def _(_):
@@ -277,7 +277,7 @@ def run_tform_viewer(cls, cfg, limit: int = 20) -> None:
     _refresh_scene()
 
     print(f"Viser:  http://localhost:{server.get_port()}")
-    print("Use the side panel to adjust axes, then copy obj_tform4x4 into your config.")
+    print("Use the side panel to adjust axes, then copy obj_gl_tform4x4_obj_raw into your config.")
     print("Ctrl+C to quit.\n")
     try:
         while True:

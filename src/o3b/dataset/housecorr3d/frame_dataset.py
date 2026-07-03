@@ -329,6 +329,24 @@ def _add_depth_pc_to_scene(
         return None
 
 
+def _corners8_to_size_tform(corners: "torch.Tensor") -> "tuple":
+    """Recover (size3d, tform4x4) from 8 box corners for draw_bbox3d.
+
+    Corner ordering matches the dataset's box construction (0-3 bottom, 4-7 top):
+    edge 0->1 is +x, 0->3 is +y, 0->4 is +z. Returns the per-axis side lengths and
+    an SE(3) placing an origin-centred box (as built by Meshes.from_objs_size3d)
+    onto these corners, so draw_bbox3d colors the edges by orientation.
+    """
+    c = corners.float()
+    ex, ey, ez = c[1] - c[0], c[3] - c[0], c[4] - c[0]
+    sx, sy, sz = ex.norm(), ey.norm(), ez.norm()
+    R = torch.stack([ex / (sx + 1e-8), ey / (sy + 1e-8), ez / (sz + 1e-8)], dim=1)  # cols
+    tform = torch.eye(4)
+    tform[:3, :3] = R
+    tform[:3, 3] = c.mean(0)
+    return torch.stack([sx, sy, sz]), tform
+
+
 def _build_frame_sidebar_imgs(fo) -> "dict":
     """Build the dict of sidebar modality images (rgb, depth, mask, kpts overlays)."""
     import numpy as np
@@ -350,6 +368,40 @@ def _build_frame_sidebar_imgs(fo) -> "dict":
             bbox_np[y1:y2+1, x1:x1+t] = color   # left
             bbox_np[y1:y2+1, x2-t:x2] = color   # right
             imgs["cam_bbox2d"] = bbox_np
+
+        # projected 3-D boxes overlaid on the rgb, drawn with draw_bbox3d so the
+        # per-edge coloring (by vertex sign) makes the box orientation clear.
+        #  - cam_bbox3d: pose reconstructed from its (8, 3) camera-space corners.
+        #  - obj_bbox3d: drawn with the actual cam_tform4x4_obj metric pose.
+        # Both should coincide; showing both lets you verify the pose/box.
+        if fo.cam_intr4x4 is not None:
+            import torch as _torch
+            from o3b.cv.visual.draw import draw_bbox3d
+            base_t = _torch.from_numpy(rgb_np).permute(2, 0, 1).float() / 255.0
+            intr = fo.cam_intr4x4.float().cpu()
+
+            if fo.cam_bbox3d is not None and tuple(fo.cam_bbox3d.shape) == (8, 3):
+                try:
+                    size, tform = _corners8_to_size_tform(fo.cam_bbox3d.float().cpu())
+                    drawn = draw_bbox3d(base_t.clone(), size, intr, tform, opengl=True)
+                    imgs["cam_bbox3d"] = drawn.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+                except Exception:
+                    pass
+
+            if (fo.obj_bbox3d is not None and tuple(fo.obj_bbox3d.shape) == (8, 3)
+                    and fo.cam_tform4x4_obj is not None):
+                try:
+                    bmin = fo.obj_bbox3d.float().cpu().min(0).values
+                    bmax = fo.obj_bbox3d.float().cpu().max(0).values
+                    size = bmax - bmin
+                    center = (bmin + bmax) / 2
+                    shift = _torch.eye(4)
+                    shift[:3, 3] = center
+                    tform = fo.cam_tform4x4_obj.float().cpu() @ shift
+                    drawn = draw_bbox3d(base_t.clone(), size, intr, tform, opengl=True)
+                    imgs["obj_bbox3d"] = drawn.permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+                except Exception:
+                    pass
     if fo.depth is not None:
         d = fo.depth.cpu().numpy()
         valid = d > 0
@@ -510,6 +562,28 @@ def _add_frame_object_to_scene(
             except Exception:
                 pass
 
+    # 3-D bounding box (orange wireframe). cam_bbox3d holds (8, 3) camera-space
+    # corners; transform them by world_tform4x4_cam exactly like the depth pc /
+    # frustum so the box lands correctly in both default and obj-centric modes.
+    bbox3d = getattr(fo, "cam_bbox3d", None)
+    if bbox3d is not None and tuple(bbox3d.shape) == (8, 3):
+        corners = bbox3d.float().cpu()
+        W = world_tform4x4_cam.float()
+        corners_h = torch.cat([corners, torch.ones(8, 1)], dim=-1)  # (8, 4)
+        corners = (W @ corners_h.T).T[:, :3].numpy()
+        EDGES = [(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)]
+        starts = np.array([corners[i] for i, _ in EDGES], dtype=np.float32)
+        ends   = np.array([corners[j] for _, j in EDGES], dtype=np.float32)
+        seg_pts = np.stack([starts, ends], axis=1)  # (12, 2, 3)
+        seg_clr = np.tile(np.array([1.0, 0.65, 0.0], dtype=np.float32), (12, 2, 1))
+        try:
+            h = server.scene.add_line_segments(
+                f"{prefix}/object/bbox3d", points=seg_pts, colors=seg_clr, line_width=2.0,
+            )
+            handles.append(h)
+        except Exception:
+            pass
+
     return handles
 
 
@@ -571,10 +645,10 @@ def _visualize_frame_object_pairs_viser(dataset, debug: bool = False, obj_centri
         # offset target along +x by ~1.5 * its size so the two don't overlap
         offset_x = 1.5 * max(float(src.obj_size or 0.3), float(trgt.obj_size or 0.3)) + 0.3
 
-        handles.extend(_add_frame_object_to_scene(
-            server, src, "/src", offset_x=0.0, obj_centric=obj_centric, kpt_colors=kpt_colors))
-        handles.extend(_add_frame_object_to_scene(
-            server, trgt, "/trgt", offset_x=offset_x, obj_centric=obj_centric, kpt_colors=kpt_colors))
+        handles.extend(src.viz(
+            server=server, node_prefix="/src", offset_x=0.0, obj_centric=obj_centric, kpt_colors=kpt_colors))
+        handles.extend(trgt.viz(
+            server=server, node_prefix="/trgt", offset_x=offset_x, obj_centric=obj_centric, kpt_colors=kpt_colors))
 
         # sidebar: src + trgt modality images
         src_imgs  = {f"src/{k}": v  for k, v in _build_frame_sidebar_imgs(src).items()}
@@ -680,59 +754,11 @@ def _visualize_frame_objects_viser(dataset, debug: bool = False, obj_centric: bo
             if dataset._transform is not None:
                 fo = dataset._transform(fo)
 
-        H_img = fo.rgb.shape[1] if fo.rgb is not None else 480
-        W_img = fo.rgb.shape[2] if fo.rgb is not None else 640
-
-        # Sidebar images use the original camera-space tform for 2-D projection;
-        # build them now before _fo_to_obj_centric replaces cam_tform4x4_obj_ncds.
-        fo_for_sidebar = fo
-
-        # Object-centric: invert the cam←obj transform so the mesh stays at the origin
-        # and the camera is placed in object/NCDS space.
-        world_tform4x4_cam = None
-        if obj_centric:
-            fo, world_tform4x4_cam = _fo_to_obj_centric(fo)
-
-        # Camera coordinate axes
-        cam_pose = world_tform4x4_cam if world_tform4x4_cam is not None else torch.eye(4)
-        handles.extend(_add_axes_to_scene(server, "/camera/axes", cam_pose,
-                                          axes_length=0.15, axes_radius=0.006))
-
-        # Mesh: in obj-centric mode fo.cam_tform4x4_obj_ncds == identity → mesh at origin
-        if fo.mesh is not None and fo.cam_tform4x4_obj_ncds is not None:
-            fo_world = fo.transform(fo.cam_tform4x4_obj_ncds)
-            hs = fo_world._build_scene_handles(server, "/object", (0.0, 0.0, 0.0))
-            handles.extend(h for h in hs.values() if h is not None)
-
-        # Object coordinate axes
-        if fo.cam_tform4x4_obj_ncds is not None:
-            ax_len = max(0.05, float(fo.obj_size or 0.2) * 0.75)
-            handles.extend(_add_axes_to_scene(server, "/object/axes", fo.cam_tform4x4_obj_ncds,
-                                              axes_length=ax_len, axes_radius=ax_len * 0.04))
-
-        if fo.cam_intr4x4 is not None:
-            handles.extend(_add_frustum_to_scene(
-                server, fo.cam_intr4x4, H=H_img, W=W_img,
-                world_tform4x4_cam=world_tform4x4_cam,
-            ))
-            if fo.rgb is not None:
-                h = _add_rgb_image_to_scene(
-                    server, fo.rgb, fo.cam_intr4x4, depth=fo.depth,
-                    world_tform4x4_cam=world_tform4x4_cam,
-                )
-                if h is not None:
-                    handles.append(h)
-
-            if fo.depth is not None:
-                h = _add_depth_pc_to_scene(
-                    server, fo.depth, fo.rgb, fo.cam_intr4x4,
-                    world_tform4x4_cam=world_tform4x4_cam,
-                )
-                if h is not None:
-                    handles.append(h)
+        # 3-D scene (mesh, camera frustum, rgb panel, depth pc, axes, keypoints)
+        handles.extend(fo.viz(server=server, obj_centric=obj_centric))
 
         # ── sidebar modality images ───────────────────────────────────────────
-        imgs = _build_frame_sidebar_imgs(fo_for_sidebar)
+        imgs = _build_frame_sidebar_imgs(fo)
         _mod_imgs[0] = imgs
         if imgs:
             keys = list(imgs.keys())

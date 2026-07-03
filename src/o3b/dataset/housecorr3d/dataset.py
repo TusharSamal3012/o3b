@@ -299,11 +299,23 @@ class HouseCorr3D(ConfigurableDataset):
             category_id             = category_id,
         )
 
-        if self.cfg.obj_tform4x4 is not None:
+        if self.cfg.obj_gl_tform4x4_obj_raw is not None:
             import torch as _torch
-            obj = obj.transform(_torch.tensor(self.cfg.obj_tform4x4, dtype=_torch.float32))
+            from dataclasses import replace as _r
+            T = _torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=_torch.float32)
+            # transform() rotates verts/kpts by T and updates M → M @ inv(T).
+            obj = obj.transform(T)
+            # Apply T on the *other* side too, so M → T @ M @ inv(T) (both sides).
+            # This rotates the metric object frame itself by T into the canonical
+            # (right/top/back → X/Y/Z) orientation, instead of leaving metric invariant.
+            # The matching pose correction is cam_tform4x4_obj @ inv(T) in the frame loader.
+            if obj.obj_ncds0c_tform4x4_obj is not None:
+                obj = _r(
+                    obj,
+                    obj_ncds0c_tform4x4_obj=T @ obj.obj_ncds0c_tform4x4_obj.float(),
+                )
 
-        # Compute obj_size3d / obj_bbox3d in metric (original) object space.
+        # Compute obj_size3d / obj_bbox3d in canonical metric object space.
         # tform = obj_ncds0c_tform4x4_obj maps NCDS-space verts → metric object space.
         if obj.mesh is not None and obj.mesh.verts is not None and obj.obj_ncds0c_tform4x4_obj is not None:
             import torch as _torch
@@ -834,7 +846,7 @@ class HouseCorr3D(ConfigurableDataset):
         """Load one frame-object from frames.db.
 
         Object geometry (mesh, kpts, tform) is delegated to _load_object_from_row,
-        which applies obj_tform4x4, mesh_type conversion, and normalises kpts to
+        which applies obj_gl_tform4x4_obj_raw, mesh_type conversion, and normalises kpts to
         NCDS space.  obj_size is rescaled from mesh units to metres via obj_scale.
         cam_tform4x4_obj_ncds = cam_tform4x4_obj_metric @ obj_ncds0c_tform4x4_obj
         maps NCDS → camera space in metric units.
@@ -897,14 +909,20 @@ class HouseCorr3D(ConfigurableDataset):
             cam_tform4x4_obj_raw = C @ cam_tform4x4_obj_raw
 
         # SVD-normalise rotation, embed obj_scale.
-        # obj_tform4x4 is applied inside _load_object_from_row; obj_bbox3d comes out
-        # in the same raw-metric space that cam_tform4x4_obj_metric maps from (T cancels
-        # in transform() via tform_new = tform_old @ inv(T)), so no extra correction here.
         cam_tform4x4_obj_metric = None
         if cam_tform4x4_obj_raw is not None:
             U, _, Vh = torch.linalg.svd(cam_tform4x4_obj_raw[:3, :3].float())
             cam_tform4x4_obj_metric = cam_tform4x4_obj_raw.clone().float()
             cam_tform4x4_obj_metric[:3, :3] = (U @ Vh) * obj_scale
+
+        # obj_gl_tform4x4_obj_raw rotates the metric object frame by T into the canonical
+        # orientation (applied on both sides of obj_ncds0c_tform4x4_obj in
+        # _load_object_from_row).  To keep the object projecting to the same pixels,
+        # the pose must map canonical-metric → cam, i.e. cam_tform4x4_obj @ inv(T).
+        if cam_tform4x4_obj_metric is not None and self.cfg.obj_gl_tform4x4_obj_raw is not None:
+            from o3b.cv.geometry.transform import inv_tform4x4
+            T = torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=torch.float32)
+            cam_tform4x4_obj_metric = cam_tform4x4_obj_metric @ inv_tform4x4(T)
 
         cam_tform4x4_obj = cam_tform4x4_obj_metric if _want("cam_tform4x4_obj", mods) else None
 
@@ -947,6 +965,7 @@ class HouseCorr3D(ConfigurableDataset):
             cam_tform4x4_obj_ncds   = cam_tform4x4_obj_ncds,
             cam_bbox2d              = cam_bbox2d,
             cam_bbox3d              = cam_bbox3d,
+            obj_bbox3d              = (obj.obj_bbox3d if (obj is not None and _want("obj_bbox3d", mods)) else None),
             mesh                    = obj.mesh if obj is not None else None,
             obj_ncds0c_tform4x4_obj = tform if _want("obj_ncds0c_tform4x4_obj", mods) else None,
             obj_size_ncds           = obj_size_ncds,
@@ -960,7 +979,8 @@ class HouseCorr3D(ConfigurableDataset):
     # ── occlusion-aware keypoint visibility helpers ───────────────────────────
 
     def _cam_tform4x4_obj_metric(self, row) -> "Optional[torch.Tensor]":
-        """Metric cam←obj SE(3) for a frame row (SVD-normalised R, obj_scale embedded)."""
+        """Canonical-metric cam←obj SE(3) for a frame row (SVD-normalised R, obj_scale
+        embedded, obj_gl_tform4x4_obj_raw applied as @ inv(T) to match _load_object_from_row)."""
         raw = row.get("cam_tform4x4_obj")
         if not raw:
             return None
@@ -972,6 +992,10 @@ class HouseCorr3D(ConfigurableDataset):
         U, _, Vh = torch.linalg.svd(M[:3, :3].float())
         out = M.clone().float()
         out[:3, :3] = (U @ Vh) * obj_scale
+        if self.cfg.obj_gl_tform4x4_obj_raw is not None:
+            from o3b.cv.geometry.transform import inv_tform4x4
+            T = torch.tensor(self.cfg.obj_gl_tform4x4_obj_raw, dtype=torch.float32)
+            out = out @ inv_tform4x4(T)
         return out
 
     def _obj_cam_mesh(self, row) -> "Optional[tuple]":

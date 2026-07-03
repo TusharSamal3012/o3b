@@ -4179,6 +4179,7 @@ class Meshes(OD3D_Objects3D):
         obj_tform4x4_objs=None,
         zfar=1e3,
         znear=1e-2,
+        opengl=False,
         **kwargs,
     ):
         """
@@ -4191,6 +4192,9 @@ class Meshes(OD3D_Objects3D):
             modalities: (List(PROJECT_MODALITIES)) the modalities to render.
             add_clutter: bool, determines wether to add clutter features to the rendered features.
             obj_tform4x4_objs: (B, O, 4, 4,) or (O, 4, 4)
+            opengl: if True, cams_tform4x4_obj is given in the OpenGL convention
+                (-Z forward, +Y up) and is converted to the OpenCV convention
+                (+Z forward, +Y down) the rasterizers expect.
         Returns:
             mods2d_rendered (Dict[PROJECT_MODALITIES, torch.Tensor]): (B, F, H, W) dict of rendered modalities.
         """
@@ -4198,6 +4202,15 @@ class Meshes(OD3D_Objects3D):
         device = cams_tform4x4_obj.device
         dtype = cams_tform4x4_obj.dtype
         render_count = cams_tform4x4_obj.shape[0]
+
+        if opengl:
+            # OpenGL (-Z forward, +Y up) → OpenCV (+Z forward, +Y down): flip Y and Z.
+            _gl2cv = torch.diag(
+                torch.tensor([1.0, -1.0, -1.0, 1.0], device=device, dtype=dtype)
+            )
+            cams_tform4x4_obj = (
+                _gl2cv[None].expand(cams_tform4x4_obj.shape).bmm(cams_tform4x4_obj)
+            )
 
         if self.face_blend_type == FACE_BLEND_TYPE.HARD:
             blur_radius = 0.0

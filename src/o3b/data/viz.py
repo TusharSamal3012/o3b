@@ -331,9 +331,11 @@ def visualize_dataset(
 
                 # add a camera frustum + rendered RGB panel per viewpoint
                 from o3b.dataset.housecorr3d.frame_dataset import (
-                    _add_frustum_to_scene, _add_rgb_image_to_scene,
+                    _add_frustum_to_scene, _add_rgb_image_to_scene, _rot3x3_to_wxyz,
                 )
                 N_views = cam_tforms.shape[0]
+                # axis-gizmo length scaled to the object (verts normalised to ~[-1,1])
+                _cam_axis_len = 0.4
                 for vi in range(N_views):
                     world_tform4x4_cam = torch.linalg.inv(cam_tforms[vi].float())
                     hs = _add_frustum_to_scene(
@@ -342,6 +344,20 @@ def visualize_dataset(
                         world_tform4x4_cam=world_tform4x4_cam,
                     )
                     handles.extend(hs)
+                    # 3D axis gizmo at the camera origin (X=red, Y=green, Z=blue)
+                    try:
+                        _wxyz = _rot3x3_to_wxyz(world_tform4x4_cam[:3, :3].float())
+                        _pos  = tuple(float(v) for v in world_tform4x4_cam[:3, 3].float().cpu())
+                        handles.append(server.scene.add_frame(
+                            f"/render/cam{vi}/axes",
+                            wxyz=_wxyz,
+                            position=_pos,
+                            axes_length=_cam_axis_len,
+                            axes_radius=_cam_axis_len * 0.025,
+                            origin_radius=_cam_axis_len * 0.04,
+                        ))
+                    except Exception:
+                        pass
                     rgb_vi   = modalities["rgb"][vi]              # (3, H, W)
                     depth_vi = (modalities["depth"][vi, 0]
                                 if "depth" in modalities else None)  # (H, W) or None
@@ -394,51 +410,8 @@ def visualize_dataset(
     except KeyboardInterrupt:
         print("\nStopping.")
 
-
-def get_front_viewpoint(dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
-    """Single front view: camera facing the object head-on (azim=0, elev=0)."""
-    import math
-    import torch
-    from o3b.cv.geometry.transform import transf4x4_from_spherical
-    from o3b.data.datatypes import FrameObjectBatch
-    cam = transf4x4_from_spherical(
-        azim=torch.tensor([0.0]),
-        elev=torch.tensor([0.0]),
-        theta=torch.tensor([0.0]),
-        dist=dist,
-    )
-    return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
-
-
-def get_front_top_viewpoints(dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
-    """Front and top-down views."""
-    import math
-    import torch
-    from o3b.cv.geometry.transform import transf4x4_from_spherical
-    from o3b.data.datatypes import FrameObjectBatch
-    cam = transf4x4_from_spherical(
-        azim=torch.tensor([0.0, 0.0]),
-        elev=torch.tensor([0.0, math.pi / 2.0 - 0.01]),
-        theta=torch.tensor([0.0, 0.0]),
-        dist=dist,
-    )
-    return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
-
-
 def get_front_top_right_viewpoints(dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
-    """Front, top-down, and right-side views."""
-    import math
-    import torch
-    from o3b.cv.geometry.transform import transf4x4_from_spherical
-    from o3b.data.datatypes import FrameObjectBatch
-    cam = transf4x4_from_spherical(
-        azim=torch.tensor([0.0,        0.0,                  -math.pi / 2.0]),
-        elev=torch.tensor([0.0,        math.pi / 2.0 - 0.01, 0.0          ]),
-        theta=torch.tensor([0.0,       0.0,                  0.0          ]),
-        dist=dist,
-    )
-    return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
-
+    return _get_render_viewpoints(n_views=3, dist=dist, mesh=mesh)
 
 def _get_render_viewpoints(n_views: int, dist: float = 5.0, mesh=None) -> "FrameObjectBatch":
     """Dispatch to the right semantic viewpoint function based on n_views.
@@ -448,19 +421,12 @@ def _get_render_viewpoints(n_views: int, dist: float = 5.0, mesh=None) -> "Frame
     3  → get_front_top_right_viewpoints
     >3 → get_cam_tform4x4_obj_for_viewpoints_count
     """
-    if n_views == 1:
-        return get_front_viewpoint(dist=dist, mesh=mesh)
-    elif n_views == 2:
-        return get_front_top_viewpoints(dist=dist, mesh=mesh)
-    elif n_views == 3:
-        return get_front_top_right_viewpoints(dist=dist, mesh=mesh)
-    else:
-        from o3b.cv.geometry.transform import get_cam_tform4x4_obj_for_viewpoints_count
-        from o3b.data.datatypes import FrameObjectBatch
-        cam = get_cam_tform4x4_obj_for_viewpoints_count(
-            viewpoints_count=n_views, dist=dist
-        )
-        return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
+    from o3b.cv.geometry.transform import get_cam_tform4x4_obj_for_viewpoints_count
+    from o3b.data.datatypes import FrameObjectBatch
+    cam = get_cam_tform4x4_obj_for_viewpoints_count(
+        viewpoints_count=n_views, dist=dist
+    )
+    return FrameObjectBatch(cam_tform4x4_obj=cam, mesh=mesh)
 
 
 def sample_uniform_viewpoints(

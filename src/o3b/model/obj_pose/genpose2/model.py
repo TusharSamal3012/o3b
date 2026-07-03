@@ -56,7 +56,7 @@ class GenPose2(OD3D_Model):
         tracking_T0: float = 0.55,
         ckpt_url: Optional[str] = _DEFAULT_CKPT_URL,
         cam_tform4x4_cam_raw: Optional[list] = None,
-        obj_tform4x4: Optional[list] = None,
+        obj_gl_tform4x4_obj_gp2: Optional[list] = None,
     ):
         super().__init__()
         self.genpose2_fpath = Path(genpose2_fpath) if genpose2_fpath is not None else None
@@ -72,15 +72,17 @@ class GenPose2(OD3D_Model):
         self.tracking_T0 = tracking_T0
         self._prev_pose = None
         # Optional convention transform applied to the predicted pose to match the
-        # dataset's cam_tform4x4_obj convention:
-        #   cam_tform4x4_obj = cam_tform4x4_cam_raw @ pred @ obj_tform4x4
+        # dataset's cam_tform4x4_obj convention.  obj_gl_tform4x4_obj_gp2 maps the
+        # GenPose2 object frame → canonical (GL) object frame; it is inverted before
+        # right-multiplying the prediction:
+        #   cam_tform4x4_obj = cam_tform4x4_cam_raw @ pred @ inv(obj_gl_tform4x4_obj_gp2)
         self.cam_tform4x4_cam_raw = (
             torch.tensor(cam_tform4x4_cam_raw, dtype=torch.float32)
             if cam_tform4x4_cam_raw is not None else None
         )
-        self.obj_tform4x4 = (
-            torch.tensor(obj_tform4x4, dtype=torch.float32)
-            if obj_tform4x4 is not None else None
+        self.obj_gl_tform4x4_obj_gp2 = (
+            torch.tensor(obj_gl_tform4x4_obj_gp2, dtype=torch.float32)
+            if obj_gl_tform4x4_obj_gp2 is not None else None
         )
         self.genpose2 = None
         if self.genpose2_fpath is not None:
@@ -252,14 +254,15 @@ class GenPose2(OD3D_Model):
         
 
         # Re-express the predicted pose in the dataset's cam_tform4x4_obj convention:
-        #   cam_tform4x4_cam_raw @ pred @ obj_tform4x4
+        #   cam_tform4x4_cam_raw @ pred @ inv(obj_gl_tform4x4_obj_gp2)
         if self.cam_tform4x4_cam_raw is not None:
             cam_tform4x4_obj = self.cam_tform4x4_cam_raw.to(dtype=dtype, device=device) @ cam_tform4x4_obj
-        if self.obj_tform4x4 is not None:
-            T = self.obj_tform4x4.to(dtype=dtype, device=device)
+        if self.obj_gl_tform4x4_obj_gp2 is not None:
+            from o3b.cv.geometry.transform import inv_tform4x4
+            T = inv_tform4x4(self.obj_gl_tform4x4_obj_gp2.to(dtype=dtype, device=device))
             cam_tform4x4_obj = cam_tform4x4_obj @ T
-            # obj_tform4x4 permutes the object axes → permute the per-axis size3d
-            # to match (|R| is a permutation matrix for an axis-swap transform).
+            # obj_gl_tform4x4_obj_gp2 permutes the object axes → permute the per-axis
+            # size3d to match (|R| is a permutation matrix for an axis-swap transform).
             size3d = (T[:3, :3].abs() @ size3d.reshape(3, 1)).reshape(-1)
 
         return cam_tform4x4_obj, size3d

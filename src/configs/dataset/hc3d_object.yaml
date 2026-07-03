@@ -8,7 +8,8 @@ item_type: object # frame, object, scene, frame_object, scene_object
 #mesh_type: "mc16_vuni4_r256_fdm"    # DenseMatcher (SDDINO, 768-dim) — set checkpoint paths in configs/model/dm.yaml first
 #mesh_type: "mc16_vuni4_r256_fdmmv"
 
-mesh_type: "mc16_vuni4_r256_fdinov2s" 
+#mesh_type: "mc16_vuni4_r256_fdinov2s" 
+mesh_type: "mc16_vuni100_r256_fdm"
 
 # o3b dataset fetch -d hc3d_object  
 # o3b dataset index -d hc3d_object

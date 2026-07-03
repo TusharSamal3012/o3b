@@ -39,7 +39,7 @@ object_modalities:
   - category
 
 # rows: right, top, back → X, Y, Z (canonical)
-obj_tform4x4:  
+obj_gl_tform4x4_obj_raw:  
   - [ 0.00000,  0.00000,  1.00000,  0.00000]
   - [ 0.00000,  1.00000,  0.00000,  0.00000]
   - [-1.00000, -0.00000, -0.00000,  0.00000]

@@ -80,7 +80,7 @@ def _build_dataset_parser(sub):
 
     p_tform = ds_sub.add_parser(
         "tform",
-        help="Interactive axis-convention viewer — determine obj_tform4x4 for the dataset",
+        help="Interactive axis-convention viewer — determine obj_gl_tform4x4_obj_raw for the dataset",
     )
     _add_config(p_tform)
     p_tform.add_argument("--limit", type=int, default=20, metavar="N",

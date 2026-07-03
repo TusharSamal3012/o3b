@@ -71,8 +71,9 @@ class DatasetConfig:
     frame_pair_view_mode: str                = "aligned"
     filter_is_real:    Optional[bool]        = None   # None = all, True = real only, False = synthetic only
     filter_score_zero: bool                  = False  # OpenTT: drop clips where both scores == 0
-    # dataset-wide rigid transform applied to every loaded object (4x4, R|t convention)
-    obj_tform4x4:          Optional[list]    = None   # [[r00,r01,r02,tx],[...],[...],[0,0,0,1]]
+    # dataset-wide rigid transform mapping the raw object frame → canonical (GL) object
+    # frame, applied to every loaded object (4x4, R|t convention)
+    obj_gl_tform4x4_obj_raw: Optional[list]   = None   # [[r00,r01,r02,tx],[...],[...],[0,0,0,1]]
     # camera-convention transform: left-multiplies cam_tform4x4_obj_raw (e.g. CV→OpenGL flip)
     cam_tform4x4_cam_raw:  Optional[list]    = None   # [[r00,...],[...],[...],[0,0,0,1]]
 
@@ -112,7 +113,7 @@ class DatasetConfig:
             "frame_pair_view_mode":          self.frame_pair_view_mode,
             "filter_is_real":     self.filter_is_real,
             "filter_score_zero":  self.filter_score_zero,
-            "obj_tform4x4":         self.obj_tform4x4,
+            "obj_gl_tform4x4_obj_raw": self.obj_gl_tform4x4_obj_raw,
             "cam_tform4x4_cam_raw": self.cam_tform4x4_cam_raw,
             "transform":            self.transform,
             "sharded_name":       self.sharded_name,
@@ -145,7 +146,7 @@ class DatasetConfig:
             filter_is_real    = None if "filter_is_real" not in d or d["filter_is_real"] is None
                                  else bool(d["filter_is_real"]),
             filter_score_zero = bool(d.get("filter_score_zero", False)),
-            obj_tform4x4         = d.get("obj_tform4x4"),
+            obj_gl_tform4x4_obj_raw = d.get("obj_gl_tform4x4_obj_raw", d.get("obj_tform4x4")),
             cam_tform4x4_cam_raw = d.get("cam_tform4x4_cam_raw"),
             transform            = d.get("transform"),
             sharded_name         = d.get("sharded_name"),
