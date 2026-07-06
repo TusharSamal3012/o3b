@@ -242,6 +242,11 @@ def _build_platform_parser(sub):
         "-p", "--platform", default="slurm", metavar="PLATFORM",
         help="Platform name matching a config in configs/platform/ (default: slurm)",
     )
+    p_runi.add_argument(
+        "--forward", default=None, metavar="LOCAL:REMOTE",
+        help="Tunnel localhost:LOCAL to the allocated compute node's REMOTE port "
+             "(through the platform's ssh host), e.g. --forward 8080:8080",
+    )
 
     p_setupi = plat_sub.add_parser(
         "setupi",
@@ -967,6 +972,7 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
 
 def _run_platform_runi(args):
     import subprocess
+    import uuid
 
     ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(args.platform)
 
@@ -979,9 +985,88 @@ def _run_platform_runi(args):
         input="\n".join(init_lines), text=True, check=True,
     )
 
+    tunnel_proc = None
+    forward = getattr(args, "forward", None)
+    if forward:
+        local_port, _, remote_port = forward.partition(":")
+        if not remote_port:
+            raise ValueError(f"--forward must be LOCAL:REMOTE, got {forward!r}")
+        job_name = f"o3b_runi_{uuid.uuid4().hex[:8]}"
+        srun += f" --job-name {job_name}"
+        tunnel_proc = _forward_port_once_running(ssh_host, job_name, local_port, remote_port)
+
     srun += f" --pty bash --init-file {remote_init}"
     print(f"Opening interactive session on {ssh_host} in {repo_path or path_ws or '~'}…")
-    subprocess.run(["ssh", "-t", ssh_host, srun])
+    try:
+        subprocess.run(["ssh", "-t", ssh_host, srun])
+    finally:
+        if tunnel_proc is not None:
+            tunnel_proc.stop()
+
+
+class _PortTunnel:
+    """Handle to a background port-forward thread + the ssh -L process it starts."""
+
+    def __init__(self):
+        self.proc: "subprocess.Popen | None" = None
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+        if self.proc is not None:
+            self.proc.terminate()
+
+
+def _forward_port_once_running(ssh_host: str, job_name: str, local_port: str, remote_port: str) -> "_PortTunnel":
+    """Poll squeue for *job_name*'s node, then open `ssh -L local:node:remote` in the background.
+
+    Runs in a daemon thread so the caller's interactive srun session isn't blocked
+    waiting for the job to start.
+    """
+    import shlex
+    import subprocess
+    import threading
+    import time
+
+    handle = _PortTunnel()
+    # ssh joins trailing argv elements with plain spaces before handing them to the
+    # remote shell, so a value containing a space (the -o format string) must be
+    # quoted ourselves and passed as a single already-assembled command string.
+    remote_cmd = (
+        f"squeue -h -n {shlex.quote(job_name)} -o {shlex.quote('%N %T')}"
+    )
+
+    def _watch():
+        node = None
+        for _ in range(120):  # ~2 minutes
+            if handle._stop:
+                return
+            time.sleep(1)
+            try:
+                out = subprocess.check_output(
+                    ["ssh", ssh_host, remote_cmd],
+                    text=True, timeout=10,
+                ).strip()
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                continue
+            if not out:
+                continue
+            parts = out.split()
+            if len(parts) == 2 and parts[1] == "RUNNING" and parts[0] not in ("", "(None)"):
+                node = parts[0]
+                break
+        if handle._stop:
+            return
+        if node is None:
+            print(f"WARNING: timed out waiting for job {job_name} to start — no port forwarded.")
+            return
+        print(f"Forwarding localhost:{local_port} -> {node}:{remote_port} (via {ssh_host})")
+        handle.proc = subprocess.Popen(
+            ["ssh", "-N", "-L", f"{local_port}:{node}:{remote_port}", ssh_host],
+        )
+
+    threading.Thread(target=_watch, daemon=True).start()
+    return handle
 
 
 def _run_platform_setupi(args):
