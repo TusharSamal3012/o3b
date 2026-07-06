@@ -50,5 +50,5 @@ transform:
   bbox_overlap: 0.15
 
 categories:
-  #- toy_motorcycle
-  - hair_dryer
+#  #- toy_motorcycle
+#  - hair_dryer
