@@ -108,9 +108,19 @@ def crop_with_bbox(
     ctx=None,
     mode="bilinear",
     align_corners=False,
-    ensure_squared=True,
+    crop_type="crop_large_side",
     scale_bbox=1.3,
 ):
+    """
+    Args:
+        crop_type: how to square the bbox before resizing to (H_out, W_out):
+            "crop_large_side": pad the shorter bbox side up to the longer one
+                (crop region contains the full original bbox).
+            "crop_small_side": shrink the longer bbox side down to the shorter
+                one (crop region is a center-crop of the original bbox).
+            "crop_resize_ratio": keep the bbox's own aspect ratio; the aspect
+                ratio changes on resize to (H_out, W_out) instead.
+    """
     # bbox: x0, y0, x1, y1
     # center: x, y
     # scale: sx, sy
@@ -120,10 +130,15 @@ def crop_with_bbox(
     #bbox_H = min(img.shape[-2], img.shape[-1])
     #bbox_W = bbox_H
 
-    if ensure_squared:
-        # enusres that squared crop
-        bbox_W = max(bbox_H, bbox_W)
-        bbox_H = bbox_W
+    if crop_type == "crop_large_side":
+        bbox_W = bbox_H = max(bbox_H, bbox_W)
+    elif crop_type == "crop_small_side":
+        bbox_W = bbox_H = min(bbox_H, bbox_W)
+    elif crop_type == "crop_resize_ratio":
+        pass
+    else:
+        msg = f"Unknown crop_type {crop_type}."
+        raise ValueError(msg)
 
     bbox_W = bbox_W * scale_bbox
     bbox_H = bbox_H * scale_bbox

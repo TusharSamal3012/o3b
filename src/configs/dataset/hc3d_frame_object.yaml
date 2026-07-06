@@ -1,5 +1,6 @@
 # o3b dataset fetch -d hc3d_frame_object
 # o3b dataset index -d hc3d_frame_object --remove
+# o3b dataset index -d hc3d_frame_object --remote -p slurm_lmbl40
 # (filter_count_max stops indexing after this many filter-matching rows; also limits viz)
 
 # o3b dataset viz   -d hc3d_frame_object
@@ -48,6 +49,7 @@ transform:
   W: 256 # 256
   # per-side crop margin as a fraction of bbox size (crop spans 1 + 2*bbox_overlap)
   bbox_overlap: 0.15
+  crop_type: "crop_large_side" # "crop_large_side" | "crop_small_side" | "crop_resize_ratio"
 
 categories:
   - backpack

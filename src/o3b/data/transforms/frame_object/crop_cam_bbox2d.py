@@ -20,17 +20,27 @@ class CropCamBBox2D(O3B_Transform):
             size (default 0.15). 0.15 means the crop extends by 0.15 * bbox_size
             beyond each edge, so the crop spans (1 + 2 * bbox_overlap) of the bbox.
             Combined multiplicatively with scale_bbox.
-        ensure_squared: force the crop region to be square (default False).
+        crop_type: how to square the cam_bbox2d region before resizing it to
+            (H, W) (default "crop_resize_ratio"):
+              - "crop_large_side": pad the shorter bbox side up to the longer
+                one, so the crop contains the full bbox (aspect preserved).
+              - "crop_small_side": shrink the longer bbox side down to the
+                shorter one, i.e. a center-crop that discards the excess of
+                the longer side (aspect preserved).
+              - "crop_resize_ratio": keep the bbox's own (possibly
+                non-square) aspect ratio; it gets resized/distorted to fit
+                (H, W) instead.
     """
 
     def __init__(self, H: int, W: int, scale_bbox: float = 1.0,
-                 bbox_overlap: float = 0.15, ensure_squared: bool = False):
+                 bbox_overlap: float = 0.15,
+                 crop_type: str = "crop_resize_ratio"):
         super().__init__()
         self.H = H
         self.W = W
         self.scale_bbox = scale_bbox
         self.bbox_overlap = bbox_overlap
-        self.ensure_squared = ensure_squared
+        self.crop_type = crop_type
 
     @property
     def _crop_scale(self) -> float:
@@ -65,7 +75,7 @@ class CropCamBBox2D(O3B_Transform):
                 W_out=self.W,
                 mode="bilinear",
                 scale_bbox=self._crop_scale,
-                ensure_squared=self.ensure_squared,
+                crop_type=self.crop_type,
             )
             updates["rgb"] = rgb_crop.to(dtype=fo.rgb.dtype)
         else:
@@ -78,7 +88,7 @@ class CropCamBBox2D(O3B_Transform):
                 W_out=self.W,
                 mode="bilinear",
                 scale_bbox=self._crop_scale,
-                ensure_squared=self.ensure_squared,
+                crop_type=self.crop_type,
             )
 
         # ---- nearest fields ----
@@ -95,7 +105,7 @@ class CropCamBBox2D(O3B_Transform):
                 W_out=self.W,
                 mode="nearest_v2",
                 scale_bbox=self._crop_scale,
-                ensure_squared=self.ensure_squared,
+                crop_type=self.crop_type,
             )
             if squeeze:
                 out = out.squeeze(0)
