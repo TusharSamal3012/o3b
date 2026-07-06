@@ -15,7 +15,11 @@ skip_submodules:
 
 setup: False
 deps:
-  #- densematcher     # available: diff3f, densematcher, genpose2
+  #- diff3f
+  #- genpose2
+  #- geco
+  #- mrf3dtopo
+  #- densematcher     # available: diff3f, densematcher, genpose2, 
   #                   # creates venv_py310_cu124_torch26_densematcher and installs deps there
 
 path_ws: /work/dlclarge1/sommerl-od3d

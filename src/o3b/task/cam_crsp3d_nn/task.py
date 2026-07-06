@@ -110,6 +110,55 @@ def _render_mesh_topdown(mesh, cam_t, cam_k, H, W):
         return np.full((H, W, 3), 235, dtype=np.uint8)
 
 
+def _render_mesh_nocs(mesh, cam_t, cam_k, H, W):
+    """Render per-pixel NOCS-0c coordinates of a mesh, then colorise pixelwise.
+
+    Renders the mesh depth, unprojects each pixel to a 3D surface point
+    (exact per-pixel coordinates — no color pipeline involved), maps it back
+    to object/NOCS-0c space via inv(cam_t), and applies
+    o3b.cv.visual.point3d_to_color3d.nocs_0c_to_rgb **pixelwise** (so its
+    checkerboard pattern stays sharp instead of being blurred by vertex-color
+    interpolation and the renderer's tone mapping).
+
+    Returns (colored (H, W, 3) float32 [0,1], mask (H, W) bool) or (None, None).
+    """
+    import numpy as np
+    if mesh is None:
+        return None, None
+    try:
+        from o3b.io import _mesh_to_trimesh
+        from o3b.cv.visual.show import render_trimesh_to_tensor
+        from o3b.cv.visual.point3d_to_color3d import nocs_0c_to_rgb
+        from o3b.cv.geometry.transform import (
+            depth2pts3d_grid, transf3d_broadcast, inv_tform4x4,
+        )
+        _, depth = render_trimesh_to_tensor(
+            _mesh_to_trimesh(mesh), cam_k.float(), cam_t.float(), H, W,
+            rgb_bg=[0.0, 0.0, 0.0],
+        )
+        depth = depth.reshape(H, W).float().cpu()
+        mask = (depth > 0)
+        # per-pixel surface points: cam space (OpenGL) → object (NOCS-0c) space
+        pts_cam = depth2pts3d_grid(depth[None], cam_k.float().cpu(), opengl=True)  # (3, H, W)
+        pts_obj = transf3d_broadcast(
+            pts_cam.permute(1, 2, 0).reshape(-1, 3), inv_tform4x4(cam_t.float().cpu()),
+        ).reshape(H, W, 3)
+        colored = nocs_0c_to_rgb(pts_obj).clamp(0, 1)
+        colored = torch.where(mask[..., None], colored, torch.zeros_like(colored))
+        return colored.numpy().astype(np.float32), mask.numpy()
+    except Exception:
+        return None, None
+
+
+def _nocs_on_bg(colored, mask, bg, alpha=1.0):
+    """Composite a NOCS render onto a background (H, W, 3) float [0,1] image."""
+    import numpy as np
+    out = bg.astype(np.float32).copy()
+    m = mask.astype(np.float32)[..., None] * alpha
+    out = out * (1 - m) + colored * m
+    return (out * 255).clip(0, 255).astype(np.uint8)
+
+
 def _topdown_camera(H=256, W=256):
     """A single top-down camera (looking down the NCDS vertical axis) + intrinsics."""
     from o3b.cv.visual.show import get_default_camera_intrinsics_from_img_size
@@ -657,26 +706,20 @@ class CamCrsp3DNNTask(OD3D_Task):
         self, batch, qualit, src_ncds, trgt_ncds, pred_src, pred_trgt,
         pred_mesh_kpts, kpts_valid, is_correct,
     ) -> None:
-        """NOCS-colored predicted meshes rendered from the GT viewpoints (row 1)
-        and top-down (row 2), with the mesh-barycentric correspondences drawn on
-        top → qualit.extra['correspondences_mesh']."""
+        """Predicted meshes rendered as per-pixel NOCS-0c coordinates colorised
+        pixelwise via nocs_0c_to_rgb, from the GT viewpoints overlaid on the frame
+        RGB (row 1) and top-down (row 2), with the mesh-barycentric
+        correspondences drawn on top → qualit.extra['correspondences_mesh']."""
         if qualit is None or is_correct is None or pred_mesh_kpts is None:
             return
-        from dataclasses import replace as _dc_replace
+        import numpy as np
         import torch.nn.functional as F
         from o3b.cv.geometry.transform import transf3d_broadcast, inv_tform4x4
-        from o3b.cv.visual.point3d_to_color3d import nocs_0c_to_rgb
 
         src_meshes  = batch.src_pred_mesh  if batch.src_pred_mesh  is not None else batch.src_meshes
         trgt_meshes = batch.trgt_pred_mesh if batch.trgt_pred_mesh is not None else batch.trgt_meshes
         if src_meshes is None or trgt_meshes is None:
             return
-
-        def _nocs_colored(mesh):
-            if mesh is None:
-                return None
-            verts = mesh.verts.float().cpu()
-            return _dc_replace(mesh, vert_colors=nocs_0c_to_rgb(verts).clamp(0, 1))
 
         def _vstack(rows):
             rows = [r for r in rows if r is not None]
@@ -691,40 +734,59 @@ class CamCrsp3DNNTask(OD3D_Task):
                 out.append(r)
             return torch.cat(out, dim=1)
 
+        def _rgb_np(imgs, b, H, W):
+            """Frame RGB as (H, W, 3) float [0,1]; grey fallback."""
+            if imgs is None:
+                return np.full((H, W, 3), 0.92, dtype=np.float32)
+            im = imgs[b].float().cpu()
+            if im.max() > 1.5:
+                im = im / 255.0
+            return im.clamp(0, 1).permute(1, 2, 0).numpy()
+
+        _GREY = 0.92
         eye = torch.eye(4)
         B = kpts_valid.shape[0]
         imgs = []
         for b in range(B):
             try:
-                m_src  = _nocs_colored(src_meshes[b])
-                m_trgt = _nocs_colored(trgt_meshes[b])
+                m_src, m_trgt = src_meshes[b], trgt_meshes[b]
                 if m_src is None or m_trgt is None:
                     continue
                 valid, correct = kpts_valid[b].cpu(), is_correct[b].cpu()
 
-                # ── row 1: GT viewpoints ───────────────────────────────────────
+                # ── row 1: GT viewpoints — NOCS render overlaid on the frame RGB ─
                 gt_row = None
                 if batch.src_cam_intr4x4 is not None and batch.trgt_cam_intr4x4 is not None:
                     H_s, W_s = _img_hw(batch.src_rgb, b) if batch.src_rgb is not None else (256, 256)
                     H_t, W_t = _img_hw(batch.trgt_rgb, b) if batch.trgt_rgb is not None else (256, 256)
                     src_k,  trgt_k  = batch.src_cam_intr4x4[b].float().cpu(), batch.trgt_cam_intr4x4[b].float().cpu()
                     src_t,  trgt_t  = src_ncds[b].float().cpu(), trgt_ncds[b].float().cpu()
-                    left  = _render_mesh_topdown(m_src,  src_t,  src_k,  H_s, W_s)
-                    right = _render_mesh_topdown(m_trgt, trgt_t, trgt_k, H_t, W_t)
-                    src_uv  = _proj_opengl(batch.src_obj_kpts3d[b],  src_t,  src_k)
-                    gt_uv   = _proj_opengl(batch.trgt_obj_kpts3d[b], trgt_t, trgt_k)
-                    pred_uv = _proj_opengl(pred_mesh_kpts[b], eye, trgt_k)  # already trgt-cam space
-                    gt_row = _draw_corr_panels(left, right, src_uv, gt_uv, pred_uv, valid, correct)
+                    c_s, msk_s = _render_mesh_nocs(m_src,  src_t,  src_k,  H_s, W_s)
+                    c_t, msk_t = _render_mesh_nocs(m_trgt, trgt_t, trgt_k, H_t, W_t)
+                    if c_s is not None and c_t is not None:
+                        left  = _nocs_on_bg(c_s, msk_s, _rgb_np(batch.src_rgb,  b, H_s, W_s), alpha=0.65)
+                        right = _nocs_on_bg(c_t, msk_t, _rgb_np(batch.trgt_rgb, b, H_t, W_t), alpha=0.65)
+                        src_uv  = _proj_opengl(batch.src_obj_kpts3d[b],  src_t,  src_k)
+                        gt_uv   = _proj_opengl(batch.trgt_obj_kpts3d[b], trgt_t, trgt_k)
+                        pred_uv = _proj_opengl(pred_mesh_kpts[b], eye, trgt_k)  # already trgt-cam space
+                        gt_row = _draw_corr_panels(left, right, src_uv, gt_uv, pred_uv, valid, correct)
 
-                # ── row 2: top-down ────────────────────────────────────────────
-                pred_kpts_ncds = transf3d_broadcast(
-                    pred_mesh_kpts[b].float(), inv_tform4x4(pred_trgt[b].float().cpu()),
-                )
-                top_row = _render_topdown_corr_img(
-                    m_src, m_trgt,
-                    batch.src_obj_kpts3d[b], batch.trgt_obj_kpts3d[b], pred_kpts_ncds,
-                    valid, correct,
-                )
+                # ── row 2: top-down — NOCS render on grey ─────────────────────
+                top_row = None
+                cam_t, cam_k = _topdown_camera()
+                c_s, msk_s = _render_mesh_nocs(m_src,  cam_t, cam_k, 256, 256)
+                c_t, msk_t = _render_mesh_nocs(m_trgt, cam_t, cam_k, 256, 256)
+                if c_s is not None and c_t is not None:
+                    grey = np.full((256, 256, 3), _GREY, dtype=np.float32)
+                    left  = _nocs_on_bg(c_s, msk_s, grey)
+                    right = _nocs_on_bg(c_t, msk_t, grey)
+                    pred_kpts_ncds = transf3d_broadcast(
+                        pred_mesh_kpts[b].float(), inv_tform4x4(pred_trgt[b].float().cpu()),
+                    )
+                    src_uv  = _proj_opengl(batch.src_obj_kpts3d[b],  cam_t, cam_k)
+                    gt_uv   = _proj_opengl(batch.trgt_obj_kpts3d[b], cam_t, cam_k)
+                    pred_uv = _proj_opengl(pred_kpts_ncds, cam_t, cam_k)
+                    top_row = _draw_corr_panels(left, right, src_uv, gt_uv, pred_uv, valid, correct)
 
                 combined = _vstack([gt_row, top_row])
                 if combined is not None:
