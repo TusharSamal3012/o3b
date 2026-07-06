@@ -16,4 +16,4 @@ category: "hair_dryer"
 categories:
   - ${category}
 sharded_name: hc3d_frame_object_pair_${category}
-sharded_override: true
+sharded_override: false
