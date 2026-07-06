@@ -1,14 +1,100 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
 
+logger = logging.getLogger(__name__)
+
 from o3b.task.task import OD3D_Task, register_task
 from o3b.data.datatypes.object import ObjectPairBatch
 from o3b.task.datatypes.object_pair_quant import ObjectPairQuantBatch
 from o3b.task.datatypes.object_pair_qualit import ObjectPairQualitBatch
+
+
+# ── target keypoint symmetry (discrete + continuous rotational) ───────────────
+# Mirrors CamCrsp3DNNTask's keypoint symmetry evaluation (o3b.task.cam_crsp3d_nn.task),
+# adapted for this task's vertex-anchored GT: every symmetric candidate is snapped to
+# its nearest target vertex (needed for the geodesic-distance metric below) before
+# picking the candidate closest to the prediction.
+
+def _kpts_sym_candidates(trgt_kpts: Tensor, obj_tform4x4_obj_syms: Tensor) -> Tensor:
+    """(B, K, 3) target keypoints (object space) + (B, S, 4, 4) discrete symmetry
+    transforms (see o3b.cv.metric.pose.get_obj_tform4x4_obj_sym) -> (B, K, S, 3)
+    discrete-symmetric keypoint candidates, same object space (candidate 0 is
+    always the identity)."""
+    from o3b.cv.geometry.transform import transf3d_broadcast
+    return transf3d_broadcast(
+        trgt_kpts[:, :, None, :], obj_tform4x4_obj_syms[:, None, :, :, :],
+    )
+
+
+def _kpts_sym_min_dist_to_verts(
+    kpts_syms: Tensor, axis6d_syms: Tensor, axis6d_syms_mask: Tensor,
+    pred_pos: Tensor, trgt_verts: Tensor, trgt_verts_mask: "Optional[Tensor]",
+) -> "Tuple[Tensor, Tensor, Tensor]":
+    """For each keypoint, pick the discrete/continuous symmetric target candidate
+    whose nearest-target-vertex position is closest to the prediction.
+
+    kpts_syms: (B, K, S, 3) discrete-symmetric candidates (object space, pre
+      vertex-snap; candidate 0 is the identity) — see _kpts_sym_candidates.
+    axis6d_syms: (B, 3, 6) per-axis-slot (offset, direction), object space, from
+      o3b.cv.metric.pose.get_obj_axis6d_with_mask.
+    axis6d_syms_mask: (B, 3) bool — True where that axis slot is continuously
+      (rotationally) symmetric.
+    pred_pos: (B, K, 3) predicted target vertex positions.
+    trgt_verts: (B, V, 3); trgt_verts_mask: (B, V) bool or None.
+
+    For a sample with exactly one continuous rotational axis, each discrete
+    candidate is first rotated to its closest point (around that axis) to the
+    prediction — see get_closest_B_to_A_rotated_around_axis6d — before being
+    snapped to its nearest target vertex; samples with more than one such axis
+    fall back to the discrete candidates only.
+
+    Returns (gt_vert (B, K) long, gt_pos (B, K, 3), dist (B, K)).
+    """
+    from o3b.cv.metric.pose import get_closest_B_to_A_rotated_around_axis6d
+
+    B, K, S, _ = kpts_syms.shape
+    cand = kpts_syms.clone()
+    for b in range(B):
+        mask_b = axis6d_syms_mask[b]
+        if mask_b.sum() != 1:
+            if mask_b.sum() > 1:
+                logger.warning("keypoint symmetry: >1 continuous rotational axis is not "
+                               "supported, falling back to discrete candidates only.")
+            continue
+        axis6d_b = axis6d_syms[b][mask_b][0]                              # (6,)
+        A = pred_pos[b][:, None, :].expand(K, S, 3).reshape(-1, 3)
+        Bp = cand[b].reshape(-1, 3)
+        cand[b] = get_closest_B_to_A_rotated_around_axis6d(
+            A=A, B=Bp, axis6d=axis6d_b[None].expand(K * S, 6),
+        ).reshape(K, S, 3)
+
+    # nearest target vertex for every candidate, vectorized over the batch
+    cand_flat = cand.reshape(B, K * S, 3)
+    dists = torch.cdist(cand_flat, trgt_verts)                           # (B, K*S, V)
+    if trgt_verts_mask is not None:
+        dists = dists.masked_fill(~trgt_verts_mask.unsqueeze(1), float("inf"))
+    gt_vert_flat = dists.argmin(dim=2)                                   # (B, K*S)
+    gt_pos_flat  = torch.gather(
+        trgt_verts, dim=1, index=gt_vert_flat.unsqueeze(-1).expand(-1, -1, 3),
+    )                                                                     # (B, K*S, 3)
+    gt_vert = gt_vert_flat.reshape(B, K, S)
+    gt_pos  = gt_pos_flat.reshape(B, K, S, 3)
+
+    dist_all = (gt_pos - pred_pos[:, :, None, :]).norm(dim=-1)           # (B, K, S)
+    sym_ids  = dist_all.argmin(dim=-1)                                   # (B, K)
+
+    gt_vert_sel = torch.gather(gt_vert, dim=2, index=sym_ids.unsqueeze(-1)).squeeze(-1)
+    gt_pos_sel  = torch.gather(
+        gt_pos, dim=2, index=sym_ids[:, :, None, None].expand(-1, -1, 1, 3),
+    ).squeeze(2)
+    dist = torch.gather(dist_all, dim=2, index=sym_ids.unsqueeze(-1)).squeeze(-1)
+
+    return gt_vert_sel, gt_pos_sel, dist
 
 
 # ── geodesic helper ───────────────────────────────────────────────────────────
@@ -327,15 +413,23 @@ class Crsp3DNNTask(OD3D_Task):
             ])  # (B, K)
             pred_trgt_kpt_pos = trgt_verts[B_idx, pred_trgt_kpt_vert]  # (B, K, 3)
 
-            # GT: nearest trgt_vert to trgt_kpt (3D)
-            kpt_to_trgt = torch.cdist(trgt_kpts.float(), trgt_verts.float())  # (B, K, V_trgt)
-            if trgt_verts_mask is not None:
-                kpt_to_trgt = kpt_to_trgt.masked_fill(~trgt_verts_mask.unsqueeze(1), float("inf"))
-            gt_trgt_kpt_vert = kpt_to_trgt.argmin(dim=2)             # (B, K)
-            gt_trgt_kpt_pos  = trgt_verts[B_idx, gt_trgt_kpt_vert]  # (B, K, 3)
+            # GT: nearest trgt_vert to trgt_kpt (3D), extended over target keypoint
+            # symmetry — the discrete/continuous symmetric candidate whose nearest
+            # target vertex is closest to the prediction wins (see
+            # _kpts_sym_min_dist_to_verts / CamCrsp3DNNTask's keypoint symmetry eval).
+            from o3b.cv.metric.pose import get_obj_tform4x4_obj_sym, get_obj_axis6d_with_mask
 
-            # Euclidean error
-            kpts_trgt_euc_dist      = (pred_trgt_kpt_pos - gt_trgt_kpt_pos).norm(dim=-1)       # (B, K)
+            trgt_obj_syms = batch.trgt_obj_syms.float().to(dev) if batch.trgt_obj_syms is not None \
+                else torch.ones(B_k, 3, device=dev)
+            obj_tform4x4_obj_syms = get_obj_tform4x4_obj_sym(trgt_obj_syms)                     # (B, S, 4, 4)
+            obj_axis6d_syms, obj_axis6d_syms_mask = get_obj_axis6d_with_mask(trgt_obj_syms)     # (B, 3, 6), (B, 3) bool
+
+            trgt_kpts_syms = _kpts_sym_candidates(trgt_kpts.float(), obj_tform4x4_obj_syms.to(dev))  # (B, K, S, 3)
+
+            gt_trgt_kpt_vert, gt_trgt_kpt_pos, kpts_trgt_euc_dist = _kpts_sym_min_dist_to_verts(
+                trgt_kpts_syms, obj_axis6d_syms, obj_axis6d_syms_mask,
+                pred_trgt_kpt_pos, trgt_verts.float(), trgt_verts_mask,
+            )  # (B, K) long, (B, K, 3), (B, K)
             kpts_trgt_euc_dist_mean = (kpts_trgt_euc_dist * kpts_valid.float()).sum(dim=1) / n_valid
 
             # PCK @ 0.1 * trgt_max_dim

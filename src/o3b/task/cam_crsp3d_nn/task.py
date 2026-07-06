@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional, Tuple
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from o3b.task.task import OD3D_Task, register_task
 from o3b.data.datatypes.frame_object import FrameObjectPairBatch
@@ -334,16 +337,82 @@ def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt):
     return pred_kpts
 
 
-def _variant_metrics(pred_kpts_cam_t, gt_kpts_cam_t, kpts_valid, threshold,
-                     src_vis, trgt_vis):
-    """Euclidean dist / PCK@0.1 / modal / amodal PCK for one prediction variant.
+# ── keypoint symmetry (discrete + continuous rotational) ──────────────────────
 
-    NaN predictions (variant unavailable for that sample) yield NaN aggregates so
+def _kpts_sym_candidates(trgt_kpts, trgt_ncds, obj_tform4x4_obj_syms):
+    """Discrete-symmetry target keypoint candidates, in target camera space.
+
+    trgt_kpts: (B, K, 3) target keypoints in NCDS object space.
+    trgt_ncds: (B, 4, 4) NCDS→cam (GT) pose.
+    obj_tform4x4_obj_syms: (B, S, 4, 4) discrete object-space symmetry transforms,
+      from o3b.cv.metric.pose.get_obj_tform4x4_obj_sym (candidate 0 is always the
+      identity, so this is a strict superset of the un-symmetrised keypoints).
+
+    Returns (B, K, S, 3).
+    """
+    from o3b.cv.geometry.transform import transf3d_broadcast
+    trgt_obj_kpts3d_syms = transf3d_broadcast(
+        trgt_kpts[:, :, None, :], obj_tform4x4_obj_syms[:, None, :, :, :],
+    )  # (B, K, S, 3)
+    return transf3d_broadcast(trgt_obj_kpts3d_syms, trgt_ncds[:, None, None, :, :])
+
+
+def _kpts_sym_min_dist(gt_cam_kpts_syms, axis6d_syms, axis6d_syms_mask, pred_cam_kpts):
+    """Per-keypoint distance from a prediction to its nearest symmetric target.
+
+    gt_cam_kpts_syms: (B, K, S, 3) discrete symmetric target candidates (cam space),
+      from _kpts_sym_candidates.
+    axis6d_syms: (B, 3, 6) per-axis-slot (offset, direction) in cam space, from
+      transf_axis6d_broadcast(get_obj_axis6d_with_mask(obj_syms), trgt_ncds).
+    axis6d_syms_mask: (B, 3) bool — True where that axis slot is continuously
+      (rotationally) symmetric, from o3b.cv.metric.pose.get_obj_axis6d_with_mask.
+    pred_cam_kpts: (B, K, 3) predicted target keypoints (cam space); NaN rows are
+      supported (variant unavailable for that sample) and propagate to NaN dist.
+
+    For a sample with exactly one continuous rotational axis, each discrete
+    candidate is first rotated to its closest point (around that axis) to the
+    prediction — see get_closest_B_to_A_rotated_around_axis6d — before taking the
+    arg-min over candidates; samples with more than one such axis are not
+    supported and fall back to the discrete candidates only.
+
+    Returns (dist (B, K), gt_sel (B, K, 3)) — dist to, and the winning candidate.
+    """
+    from o3b.cv.metric.pose import get_closest_B_to_A_rotated_around_axis6d
+
+    B, K, S, _ = gt_cam_kpts_syms.shape
+    gt_syms = gt_cam_kpts_syms.clone()
+    pred_safe = torch.nan_to_num(pred_cam_kpts, nan=0.0)
+    for b in range(B):
+        mask_b = axis6d_syms_mask[b]
+        if mask_b.sum() != 1:
+            if mask_b.sum() > 1:
+                logger.warning("keypoint symmetry: >1 continuous rotational axis is not supported, "
+                               "falling back to discrete candidates only.")
+            continue
+        axis6d_b = axis6d_syms[b][mask_b][0]                              # (6,)
+        A = pred_safe[b][:, None, :].expand(K, S, 3).reshape(-1, 3)
+        B_ = gt_syms[b].reshape(-1, 3)
+        gt_syms[b] = get_closest_B_to_A_rotated_around_axis6d(
+            A=A, B=B_, axis6d=axis6d_b[None].expand(K * S, 6),
+        ).reshape(K, S, 3)
+
+    dist_all = (gt_syms - pred_cam_kpts[:, :, None, :]).norm(dim=-1)              # (B, K, S)
+    dist_finite = torch.where(torch.isfinite(dist_all), dist_all, torch.full_like(dist_all, float("inf")))
+    sym_ids = dist_finite.argmin(dim=-1)                                          # (B, K)
+    gt_sel = torch.gather(gt_syms, dim=2,
+                          index=sym_ids[:, :, None, None].expand(-1, -1, 1, 3)).squeeze(2)
+    dist = (pred_cam_kpts - gt_sel).norm(dim=-1)                                  # (B, K), NaN-preserving
+    return dist, gt_sel
+
+
+def _variant_metrics(dist, kpts_valid, threshold, src_vis, trgt_vis):
+    """PCK@0.1 / modal / amodal PCK given a precomputed (symmetry-aware) per-keypoint
+    Euclidean distance (see _kpts_sym_min_dist).
+
+    NaN distances (variant unavailable for that sample) yield NaN aggregates so
     nan-safe means skip them.  Returns a dict of tensors + per-kpt is_correct.
     """
-    dev = gt_kpts_cam_t.device
-    pred = pred_kpts_cam_t.to(dev)
-    dist = (pred - gt_kpts_cam_t).norm(dim=-1)                       # (B, K)
+    dev = dist.device
     sample_ok = torch.isfinite(dist).all(dim=1)                      # (B,)
     n_valid = kpts_valid.float().sum(dim=1).clamp(min=1)
 
@@ -445,6 +514,25 @@ class CamCrsp3DNNTask(OD3D_Task):
         query_kpts_cam_q   = transf3d_broadcast(src_kpts.float(),  src_ncds.float().unsqueeze(1))   # (B, K, 3)
         gt_trgt_kpts_cam_t = transf3d_broadcast(trgt_kpts.float(), trgt_ncds.float().unsqueeze(1))   # (B, K, 3)
 
+        # ── target keypoint symmetry: discrete candidates + continuous rotational ──
+        # obj_syms axis codes: -1 continuous rotational, 1 none, 2/4 discrete rotational
+        # (see o3b.cv.metric.pose). Candidate 0 is always the identity, so this is a
+        # strict superset of gt_trgt_kpts_cam_t when no symmetry is available/annotated.
+        from o3b.cv.geometry.transform import transf_axis6d_broadcast
+        from o3b.cv.metric.pose import get_obj_tform4x4_obj_sym, get_obj_axis6d_with_mask
+
+        trgt_obj_syms = batch.trgt_obj_syms.float().to(dev) if batch.trgt_obj_syms is not None \
+            else torch.ones(B, 3, device=dev)
+        obj_tform4x4_obj_syms = get_obj_tform4x4_obj_sym(trgt_obj_syms)                       # (B, S, 4, 4)
+        obj_axis6d_syms, obj_axis6d_syms_mask = get_obj_axis6d_with_mask(trgt_obj_syms)       # (B, 3, 6), (B, 3) bool
+
+        gt_trgt_kpts_cam_t_syms = _kpts_sym_candidates(
+            trgt_kpts.float(), trgt_ncds.float(), obj_tform4x4_obj_syms,
+        )  # (B, K, S, 3)
+        trgt_cam_obj_axis6d_syms = transf_axis6d_broadcast(
+            axis6d=obj_axis6d_syms, transf4x4=trgt_ncds.float()[:, None, :, :],
+        )  # (B, 3, 6)
+
         # ── step 2: predicted relative camera transform (target ← query) ──────
         cam_query_tform4x4_cam_target = tform4x4_broadcast(pred_src.float(), inv_tform4x4(pred_trgt.float()))
         cam_target_tform4x4_cam_query = inv_tform4x4(cam_query_tform4x4_cam_target)  # (B, 4, 4)
@@ -466,8 +554,11 @@ class CamCrsp3DNNTask(OD3D_Task):
         threshold = 0.1 * trgt_obj_size.float().to(dev)  # (B,)
         src_vis, trgt_vis = batch.src_obj_kpts2d_mask, batch.trgt_obj_kpts2d_mask
 
-        m_pose = _variant_metrics(pred_trgt_kpts_cam_t, gt_trgt_kpts_cam_t,
-                                  kpts_valid, threshold, src_vis, trgt_vis)
+        pose_dist, _ = _kpts_sym_min_dist(
+            gt_trgt_kpts_cam_t_syms, trgt_cam_obj_axis6d_syms, obj_axis6d_syms_mask,
+            pred_trgt_kpts_cam_t,
+        )
+        m_pose = _variant_metrics(pose_dist, kpts_valid, threshold, src_vis, trgt_vis)
 
         quant = FrameObjectPairQuantBatch(
             cam_kpts_trgt_euc_dist      = m_pose["dist"],
@@ -482,8 +573,11 @@ class CamCrsp3DNNTask(OD3D_Task):
         for name, pred in (("featmap2d", pred_feat2d_kpts), ("mesh", pred_mesh_kpts)):
             if pred is None:
                 continue
-            m = _variant_metrics(pred, gt_trgt_kpts_cam_t, kpts_valid, threshold,
-                                 src_vis, trgt_vis)
+            dist, _ = _kpts_sym_min_dist(
+                gt_trgt_kpts_cam_t_syms, trgt_cam_obj_axis6d_syms, obj_axis6d_syms_mask,
+                pred.to(dev),
+            )
+            m = _variant_metrics(dist, kpts_valid, threshold, src_vis, trgt_vis)
             variant_correct[name] = m["is_correct"]
             quant.extra[f"cam_kpts_trgt_euc_dist_mean_{name}"] = m["dist_mean"]
             quant.extra[f"cam_kpts_trgt_pck01_{name}"]         = m["pck"]

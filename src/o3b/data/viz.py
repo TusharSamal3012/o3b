@@ -34,6 +34,34 @@ def _make_kpts_spheres(kpts_np, mask_np, radius: float = 0.02):
     return trimesh.util.concatenate(meshes)
 
 
+def _make_kpts_spheres_indexed(pts_np, idx_np, mask_np, n_total: int, radius: float = 0.012):
+    """Like _make_kpts_spheres, but each sphere's color is keyed off an explicit
+    per-point keypoint index (idx_np) rather than its position in pts_np, and
+    n_total sets the hue denominator — so colors match the primary keypoint of
+    the same index. Spheres are translucent to distinguish them from the solid
+    primary keypoints (used for symmetric keypoint candidates)."""
+    try:
+        import trimesh
+        import numpy as np
+    except ImportError:
+        return None
+
+    template = trimesh.creation.icosphere(subdivisions=1, radius=radius)
+    meshes = []
+    for pt, idx, keep in zip(pts_np, idx_np, mask_np):
+        if not keep:
+            continue
+        r, g, b = colorsys.hsv_to_rgb(idx / max(n_total, 1), 0.9, 0.88)
+        color = np.array([int(r * 255), int(g * 255), int(b * 255), 140], dtype=np.uint8)
+        s = template.copy()
+        s.apply_translation(pt)
+        s.visual.vertex_colors = np.tile(color, (len(s.vertices), 1))
+        meshes.append(s)
+    if not meshes:
+        return None
+    return trimesh.util.concatenate(meshes)
+
+
 def _rot_mat_to_wxyz(R):
     """Convert 3×3 rotation matrix (numpy) to (w, x, y, z) quaternion."""
     import numpy as np

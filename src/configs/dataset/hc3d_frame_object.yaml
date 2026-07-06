@@ -35,6 +35,7 @@ modalities:
   - obj_bbox3d
   - obj_kpts3d_mask
   - obj_kpts2d_mask
+  - obj_syms
   - category
 
 filter_has_kpts: true

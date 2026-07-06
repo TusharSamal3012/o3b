@@ -535,6 +535,8 @@ class FrameObjectPairBatch:
     trgt_cam_tform4x4_obj_ncds: Optional[Tensor] = None  # (B, 4, 4)
     src_obj_size:               Optional[Tensor] = None  # (B,) metric max bbox extent
     trgt_obj_size:              Optional[Tensor] = None  # (B,)
+    src_obj_syms:               Optional[Tensor] = None  # (B, 3) see FrameObject.obj_syms
+    trgt_obj_syms:              Optional[Tensor] = None  # (B, 3)
     # ── predicted poses (filled by a pose-estimation method; None → use GT) ────
     src_pred_cam_tform4x4_obj:  Optional[Tensor] = None  # (B, 4, 4)
     trgt_pred_cam_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
@@ -606,6 +608,7 @@ def collate_frame_object_pairs(
         setattr(out, f"{side}_cam_tform4x4_obj",      _get("cam_tform4x4_obj", side))
         setattr(out, f"{side}_cam_tform4x4_obj_ncds", _get("cam_tform4x4_obj_ncds", side))
         setattr(out, f"{side}_obj_size",              _scalar("obj_size", side))
+        setattr(out, f"{side}_obj_syms",              _get("obj_syms", side))
         setattr(out, f"{side}_cam_intr4x4",           _get("cam_intr4x4", side))
         setattr(out, f"{side}_rgb",                   _stack_or_list("rgb", side))
         setattr(out, f"{side}_depth",                 _stack_or_list("depth", side))

@@ -29,6 +29,7 @@ modalities:
   - obj_kpts3d
   - obj_kpts3d_mask
   - obj_kpts2d_mask         # occlusion-aware visibility (amodal = annotated but not visible)
+  - obj_syms                # per-axis symmetry code (see CamCrsp3DNNTask keypoint symmetry eval)
   - category
 
 # viewpoints (frames) sampled per object instance when forming cross-instance

@@ -90,6 +90,8 @@ def _add_visibility_gui(server, label: str, handle_dicts: "list[dict]") -> objec
         ("pts3d",              "Points"),
         ("kpts3d",             "Keypoints"),
         ("bbox3d",             "BBox3D"),
+        ("kpts3d_syms",        "Keypoints (sym.)"),
+        ("sym_axis",           "Symmetry Axis"),
     ]
     gui_folder = server.gui.add_folder(label)
     with gui_folder:
@@ -166,6 +168,20 @@ class Object:
     obj_bbox3d:              Optional[Tensor] = None  # (8, 3) bounding-box corners in object space
     obj_kpts3d:              Optional[Tensor] = None  # (K, 3)
     obj_kpts3d_mask:         Optional[Tensor] = None  # (K,)  bool
+    obj_syms:                Optional[Tensor] = None  # (3,)  per-axis symmetry code, in this
+                                                        #  object's own frame: -1 continuous
+                                                        #  rotational, 1 none, 2 half (180°),
+                                                        #  4 quarter (90°) — see o3b.cv.metric.pose.
+                                                        #  get_obj_tform4x4_obj_sym / get_obj_axis6d_with_mask.
+    obj_kpts3d_syms:         Optional[Tensor] = None  # (K, S, 3)  discrete-symmetric keypoint
+                                                        #  candidates derived from obj_syms + obj_kpts3d
+                                                        #  (candidate 0 is the identity); same space as
+                                                        #  obj_kpts3d, kept in sync by .transform().
+    obj_axis6d_sym:          Optional[Tensor] = None  # (6,)  continuous-rotation axis (offset xyz,
+                                                        #  direction xyz) derived from obj_syms, when
+                                                        #  exactly one continuous axis is annotated;
+                                                        #  same space as obj_kpts3d, kept in sync by
+                                                        #  .transform().
     obj_verts_part_id:       Optional[Tensor] = None  # (V,)  int64, -1 = unlabeled
     category:                Optional[int]    = None
     category_id:             Optional[int]    = None
@@ -206,6 +222,22 @@ class Object:
         if self.obj_bbox3d is not None:
             new_bbox3d = _xfm(self.obj_bbox3d)  # (8, 3) corners
 
+        # obj_kpts3d_syms / obj_axis6d_sym are ordinary geometric quantities (points /
+        # offset+direction) derived once from obj_syms — transform them like any other
+        # point data so they stay valid under an arbitrary R (not just axis permutations).
+        # obj_syms itself (the raw per-axis code) is intrinsic to the annotation and is
+        # carried over unchanged.
+        new_kpts3d_syms = None
+        if self.obj_kpts3d_syms is not None:
+            K_, S_, _ = self.obj_kpts3d_syms.shape
+            new_kpts3d_syms = _xfm(self.obj_kpts3d_syms.reshape(-1, 3)).reshape(K_, S_, 3)
+
+        new_axis6d_sym = None
+        if self.obj_axis6d_sym is not None:
+            offset    = _xfm(self.obj_axis6d_sym[None, :3])[0]
+            direction = (R @ self.obj_axis6d_sym[3:].float().cpu())
+            new_axis6d_sym = torch.cat([offset, direction])
+
         return _dc_replace(
             self,
             pts3d                   = _xfm(self.pts3d),
@@ -215,6 +247,8 @@ class Object:
             obj_ncds0c_tform4x4_obj = new_tform,
             obj_bbox3d              = new_bbox3d,
             obj_size3d              = None,  # recompute from bbox3d after transform
+            obj_kpts3d_syms         = new_kpts3d_syms,
+            obj_axis6d_sym          = new_axis6d_sym,
         )
 
     def render_modalities(
@@ -414,6 +448,52 @@ class Object:
             except Exception:
                 bbox3d_handle = None
 
+        # discrete symmetric keypoint copies (translucent, index-colored to match kpts3d)
+        kpts3d_syms_handle = None
+        if self.obj_kpts3d_syms is not None and self.obj_kpts3d_syms.shape[1] > 1:
+            from o3b.data.viz import _make_kpts_spheres_indexed
+            K_, S_, _ = self.obj_kpts3d_syms.shape
+            extra_pts = self.obj_kpts3d_syms[:, 1:, :].reshape(-1, 3).cpu().numpy()  # drop identity (idx 0)
+            idx_np = np.repeat(np.arange(K_), S_ - 1)
+            mask_np = np.repeat(
+                (self.obj_kpts3d_mask.bool().cpu().numpy() if self.obj_kpts3d_mask is not None
+                 else np.ones(K_, dtype=bool)),
+                S_ - 1,
+            )
+            kpts3d_syms_mesh = _make_kpts_spheres_indexed(extra_pts, idx_np, mask_np, n_total=K_, radius=0.014)
+            if kpts3d_syms_mesh is not None:
+                kpts3d_syms_handle = server.scene.add_mesh_trimesh(
+                    f"{node_prefix}/kpts3d_syms", kpts3d_syms_mesh,
+                    position=position_offset,
+                )
+                kpts3d_syms_handle.visible = False
+
+        # continuous-rotation symmetry axis (magenta line through the object)
+        sym_axis_handle = None
+        if self.obj_axis6d_sym is not None:
+            axis = self.obj_axis6d_sym.float().cpu()
+            center, direction = axis[:3], axis[3:]
+            direction = direction / direction.norm().clamp(min=1e-8)
+            ref_pts = self.mesh.verts if self.mesh is not None else self.obj_kpts3d
+            if ref_pts is not None and len(ref_pts) > 0:
+                proj = (ref_pts.float().cpu() - center) @ direction
+                half_len = float(proj.abs().max()) * 1.15 + 1e-4
+            else:
+                half_len = 1.0
+            off = np.array(position_offset, dtype=np.float32)
+            p0 = (center - direction * half_len).numpy() + off
+            p1 = (center + direction * half_len).numpy() + off
+            try:
+                sym_axis_handle = server.scene.add_line_segments(
+                    f"{node_prefix}/sym_axis",
+                    points=np.stack([p0, p1], axis=0)[None],  # (1, 2, 3)
+                    colors=np.tile(np.array([1.0, 0.0, 1.0], dtype=np.float32), (1, 2, 1)),
+                    line_width=3.0,
+                )
+                sym_axis_handle.visible = False
+            except Exception:
+                sym_axis_handle = None
+
         return {
             "mesh":               mesh_handle,
             "mesh_feats":         mesh_feats_handle,
@@ -423,6 +503,8 @@ class Object:
             "pts3d":              pts_handle,
             "kpts3d":             kpts_handle,
             "bbox3d":             bbox3d_handle,
+            "kpts3d_syms":        kpts3d_syms_handle,
+            "sym_axis":           sym_axis_handle,
         }
 
 
@@ -562,6 +644,7 @@ class ObjectPairBatch:
     src_obj_ncds0c_tform4x4_obj:  Optional[Tensor] = None  # (B, 4, 4)
     src_obj_kpts3d:               Optional[Tensor] = None  # (B, K, 3)
     src_obj_kpts3d_mask:          Optional[Tensor] = None  # (B, K)    bool
+    src_obj_syms:                 Optional[Tensor] = None  # (B, 3)    see Object.obj_syms
     src_category:                 Optional[Tensor] = None  # (B,)      int64
     trgt_pts3d:                   Optional[Tensor] = None  # (B, N, 3)
     trgt_pts3d_feats:             Optional[Tensor] = None  # (B, N, F) or (B, N, V, F)
@@ -576,6 +659,7 @@ class ObjectPairBatch:
     trgt_obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
     trgt_obj_kpts3d:              Optional[Tensor] = None  # (B, K, 3)
     trgt_obj_kpts3d_mask:         Optional[Tensor] = None  # (B, K)    bool
+    trgt_obj_syms:                Optional[Tensor] = None  # (B, 3)    see Object.obj_syms
     trgt_category:                Optional[Tensor] = None  # (B,)      int64
 
 
@@ -660,6 +744,7 @@ def collate_object_pairs(
         src_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","src"),
         src_obj_kpts3d              = _get("obj_kpts3d",              "src"),
         src_obj_kpts3d_mask         = _get("obj_kpts3d_mask",         "src"),
+        src_obj_syms                = _get("obj_syms",                "src"),
         src_category                = _cat("src"),
         trgt_pts3d                   = _get("pts3d",                   "trgt"),
         trgt_pts3d_feats             = _get("pts3d_feats",             "trgt"),
@@ -672,6 +757,7 @@ def collate_object_pairs(
         trgt_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","trgt"),
         trgt_obj_kpts3d              = _get("obj_kpts3d",              "trgt"),
         trgt_obj_kpts3d_mask         = _get("obj_kpts3d_mask",         "trgt"),
+        trgt_obj_syms                = _get("obj_syms",                "trgt"),
         trgt_category                = _cat("trgt"),
     )
 

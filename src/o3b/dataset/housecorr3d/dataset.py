@@ -251,6 +251,7 @@ class HouseCorr3D(ConfigurableDataset):
         need_tform       = _want("obj_ncds0c_tform4x4_obj", mods)
         need_kpts        = _want("obj_kpts3d",              mods)
         need_category    = _want("category",                mods)
+        need_syms        = _want("obj_syms",                mods)
 
         mesh, tform = None, None
         if need_mesh or need_verts3d or need_verts3d_feats or need_tform or need_kpts:
@@ -270,6 +271,11 @@ class HouseCorr3D(ConfigurableDataset):
         kpts3d, kpts3d_mask = None, None
         if need_kpts:
             kpts3d, kpts3d_mask = _load_kpts3d_by_id(oid, self.path_preprocess, tform)
+
+        obj_syms, obj_kpts3d_syms, obj_axis6d_sym = None, None, None
+        if need_syms:
+            obj_syms = _load_obj_syms_from_row(row)
+            obj_kpts3d_syms, obj_axis6d_sym = _compute_obj_sym_geometry(obj_syms, kpts3d)
 
         category_id = None
         category = None
@@ -295,6 +301,9 @@ class HouseCorr3D(ConfigurableDataset):
             obj_size                = obj_size,
             obj_kpts3d              = kpts3d,
             obj_kpts3d_mask         = kpts3d_mask,
+            obj_syms                = obj_syms,
+            obj_kpts3d_syms         = obj_kpts3d_syms,
+            obj_axis6d_sym          = obj_axis6d_sym,
             category                = category,
             category_id             = category_id,
         )
@@ -973,6 +982,9 @@ class HouseCorr3D(ConfigurableDataset):
             obj_kpts3d              = obj.obj_kpts3d      if obj is not None else None,
             obj_kpts3d_mask         = obj.obj_kpts3d_mask if obj is not None else None,
             obj_kpts2d_mask         = obj_kpts2d_mask,
+            obj_syms                = (obj.obj_syms        if (obj is not None and _want("obj_syms", mods)) else None),
+            obj_kpts3d_syms         = (obj.obj_kpts3d_syms if (obj is not None and _want("obj_syms", mods)) else None),
+            obj_axis6d_sym          = (obj.obj_axis6d_sym  if (obj is not None and _want("obj_syms", mods)) else None),
             category                = row.get("category") if _want("category", mods) else None,
         )
 
@@ -1193,6 +1205,66 @@ def _load_pose(_entry: Path, _frame_idx: int):
 
 def _load_category(_entry: Path):
     return None
+
+
+_SYM_AXIS_CODE = {"none": 1.0, "any": -1.0, "half": 2.0, "quarter": 4.0}
+
+
+def _load_obj_syms_from_row(row: dict) -> Optional[torch.Tensor]:
+    """(3,) symmetry code, in the mesh's on-disk axis order, from the object's
+    Omni6DPose/cutoop `tag.symmetry` meta column (populated generically by the
+    Meta/*.json -> "tag" index column already built by `index()`), or None when
+    absent. Codes: -1 continuous, 1 none, 2 half (180 deg), 4 quarter (90 deg).
+    This is the *raw* mesh-frame order — obj_gl_tform4x4_obj_raw's permutation is
+    applied to the derived obj_kpts3d_syms / obj_axis6d_sym (not to this code
+    itself) via Object.transform(), same as verts/kpts.
+    """
+    tag_json = row.get("tag")
+    if not tag_json:
+        return None
+    try:
+        sym = json.loads(tag_json).get("symmetry")
+    except Exception:
+        return None
+    if not isinstance(sym, dict):
+        return None
+    if sym.get("any"):
+        return torch.tensor([-1.0, -1.0, -1.0])
+    return torch.tensor([_SYM_AXIS_CODE.get(sym.get(ax), 1.0) for ax in ("x", "y", "z")])
+
+
+def _compute_obj_sym_geometry(
+    obj_syms: "Optional[torch.Tensor]",
+    obj_kpts3d: "Optional[torch.Tensor]",
+):
+    """Derive visualization/evaluation-ready symmetry geometry from a raw (3,)
+    obj_syms code, in the same space as obj_kpts3d:
+
+      - obj_kpts3d_syms (K, S, 3): discrete-symmetric keypoint candidates
+        (candidate 0 is always the identity).
+      - obj_axis6d_sym (6,): continuous-rotation axis (offset, direction), when
+        exactly one continuous ("-1") axis is annotated.
+
+    Both are plain geometric quantities (points / offset+direction) so
+    Object.transform() can keep them correctly posed under any subsequent
+    rigid transform. Returns (None, None) when obj_syms is None.
+    """
+    if obj_syms is None:
+        return None, None
+    from o3b.cv.metric.pose import get_obj_tform4x4_obj_sym, get_obj_axis6d_with_mask
+
+    kpts3d_syms = None
+    if obj_kpts3d is not None:
+        sym_tforms = get_obj_tform4x4_obj_sym(obj_syms.float())          # (S, 4, 4)
+        R, t = sym_tforms[:, :3, :3], sym_tforms[:, :3, 3]
+        kpts3d_syms = torch.einsum("sij,kj->ksi", R, obj_kpts3d.float()) + t[None]  # (K, S, 3)
+
+    axis6d_sym = None
+    axis6d, mask = get_obj_axis6d_with_mask(obj_syms.float())            # (3, 6), (3,) bool
+    if mask.sum() == 1:
+        axis6d_sym = axis6d[mask][0].clone()                              # (6,)
+
+    return kpts3d_syms, axis6d_sym
 
 
 def _load_kpts3d_by_id(
