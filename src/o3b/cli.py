@@ -1802,7 +1802,12 @@ def _run_bench_run(args) -> None:
             print(f"Ablation: {combo_stem}")
             print(f"{'='*60}")
         else:
-            run_raw = raw
+            # resolve the whole raw config together (not just the 'dataset'
+            # sub-section) so ${category}-style interpolations that reference
+            # sibling top-level keys resolve correctly, mirroring the combo branch
+            run_raw = OmegaConf.to_container(
+                OmegaConf.create(dict(raw)), resolve=True
+            )
             combo_stem = None
 
         # merge benchmark/ablation dataset section on top of base dataset config
