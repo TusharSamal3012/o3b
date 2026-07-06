@@ -3,7 +3,7 @@ o3b — o3b command-line interface.
 
 Usage:
   o3b dataset fetch  -d hc3d_object        [--url URL] [--platform PLATFORM]
-  o3b dataset index  -d hc3d_object        [--db FILE] [--platform PLATFORM]
+  o3b dataset index  -d hc3d_object        [--db FILE] [--platform PLATFORM] [--remote]
   o3b dataset viz    -d hc3d_object_pair   [--db FILE] [--limit N] [--object-id ID]
                                          [--filter-has-kpts] [--render]
                                          [--render-frames N] [--renderer BACKEND]
@@ -53,6 +53,11 @@ def _build_dataset_parser(sub):
         "--max", type=int, default=None, metavar="N", dest="max_index",
         help="Stop after indexing N total rows (for quick testing). "
              "filter_count_max in the config applies at query time only.",
+    )
+    p_index.add_argument(
+        "--remote", action="store_true",
+        help="Run this command on the --platform's compute node via `o3b platform run` "
+             "instead of indexing locally",
     )
 
     p_vis = ds_sub.add_parser("viz", help="Summarize and optionally render dataset objects")
@@ -127,7 +132,27 @@ def _build_dataset_parser(sub):
     )
 
 
+def _run_dataset_index_remote(args) -> None:
+    """Re-invoke `o3b dataset index` (minus --remote) on the platform's compute node."""
+    import shlex
+
+    parts = ["o3b", "dataset", "index", "-d", args.config.stem, "-p", args.platform]
+    if args.db:
+        parts += ["--db", str(args.db)]
+    if args.remove:
+        parts.append("--remove")
+    if getattr(args, "max_index", None) is not None:
+        parts += ["--max", str(args.max_index)]
+    remote_cmd = " ".join(shlex.quote(p) for p in parts)
+
+    _run_platform_run_cmd(args.platform, remote_cmd, job_name=f"index_{args.config.stem}")
+
+
 def _run_dataset(args):
+    if args.dataset_command == "index" and getattr(args, "remote", False):
+        _run_dataset_index_remote(args)
+        return
+
     from o3b.dataset.cli import _load_class_from_config, _platform_to_dataset_overrides
 
     overrides = _platform_to_dataset_overrides(args.platform)
@@ -229,7 +254,7 @@ def _build_platform_parser(sub):
 
     p_run = plat_sub.add_parser(
         "run",
-        help="Run a command on a compute node (non-interactive srun)",
+        help="Submit a command as a queued sbatch job on a compute node",
     )
     p_run.add_argument(
         "-p", "--platform", default="slurm", metavar="PLATFORM",
@@ -1022,21 +1047,18 @@ def _run_platform_setupi(args):
     subprocess.run(["ssh", "-t", ssh_host, srun])
 
 
-def _run_platform_run_cmd(platform: str, command: str) -> None:
-    import subprocess
+def _run_platform_run_cmd(platform: str, command: str, job_name: str | None = None) -> None:
+    """Submit *command* as a queued sbatch job on the platform and return once submitted.
 
-    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(platform)
+    Uses sbatch (not srun) so the job is queued independently of this process —
+    closing the terminal/SSH session does not kill it. Output goes to the job's
+    log file under <path_home>/slurm_jobs/, not to this terminal.
+    """
+    import re
 
-    script_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) + [command]
-    remote_script = f"{path_ws}/.od3d_run" if path_ws else "~/.od3d_run"
-    subprocess.run(
-        ["ssh", ssh_host, f"cat > {remote_script} && chmod +x {remote_script}"],
-        input="\n".join(script_lines), text=True, check=True,
-    )
-
-    srun += f" bash {remote_script}"
-    print(f"Running on {ssh_host} in {repo_path or path_ws or '~'}: {command}")
-    subprocess.run(["ssh", ssh_host, srun])
+    if job_name is None:
+        job_name = re.sub(r"[^A-Za-z0-9_.\-]+", "_", command).strip("_")[:60] or "o3b_run"
+    _run_bench_sbatch_cmd(platform, command, job_name)
 
 
 def _run_platform_run(args):

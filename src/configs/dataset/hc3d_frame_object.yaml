@@ -39,7 +39,7 @@ modalities:
   - category
 
 filter_has_kpts: true
-filter_count_max: 1000 # per category if categories is applied
+filter_count_max: 100 # per category if categories is applied
 
 
 transform:
@@ -50,5 +50,53 @@ transform:
   bbox_overlap: 0.15
 
 categories:
-#  #- toy_motorcycle
-#  - hair_dryer
+  - backpack
+  - book
+  - bottle
+  - box
+  - bread
+  - coconut
+  - conch
+  - corn
+  - dinosaur
+  - dish
+  - doll
+  - egg
+  - eraser
+  - facial_cream
+  - flower_pot
+  - glasses_case
+  - hair_dryer
+  - hamburger
+  - handbag
+  - hand_cream
+  - knife
+  - lemon
+  - light
+  - lotus_root
+  - mango
+  - mangosteen
+  - medicine_bottle
+  - mouse
+  - mug
+  - orange
+  - pillow
+  - pomegranate
+  - power_strip
+  - remote_control
+  - sausage
+  - shampoo
+  - shoe
+  - shrimp
+  - teapot
+  - tooth_brush
+  - tooth_paste
+  - toy_animals
+  - toy_boat
+  - toy_bus
+  - toy_car
+  - toy_motorcycle
+  - toy_plane
+  - toy_train
+  - toy_truck
+  - wallet
