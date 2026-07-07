@@ -283,6 +283,9 @@ def _pred_featmap2d(batch, src_ncds, kpts_valid):
     return pred_kpts, src_uv_all, pred_uv_all
 
 
+_WARNED_MESH_CORRESP = False
+
+
 def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt):
     """Variant c: mesh (barycentric) correspondence.
 
@@ -331,7 +334,18 @@ def _pred_mesh_corresp(batch, query_kpts_cam_q, pred_src, pred_trgt):
                 triangles=v_trgt_cam.numpy()[f_trgt.numpy()[face_ids]], barycentric=bary,
             )
             pred_kpts[b] = torch.from_numpy(np.asarray(pred, dtype=np.float32))
-        except Exception:
+        except Exception as e:
+            # All-NaN samples are dropped from the nan-safe metric means, so a
+            # systematic failure here (e.g. missing rtree for
+            # trimesh.nearest.on_surface) would silently erase the mesh variant.
+            global _WARNED_MESH_CORRESP
+            if not _WARNED_MESH_CORRESP:
+                _WARNED_MESH_CORRESP = True
+                logger.warning(
+                    f"mesh correspondence failed ({type(e).__name__}: {e}); "
+                    f"the 'mesh' variant will be NaN for such samples and "
+                    f"dropped from the metric means. Warning only shown once."
+                )
             continue
 
     return pred_kpts
