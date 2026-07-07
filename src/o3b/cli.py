@@ -1976,15 +1976,50 @@ def _get_existing_jobs_on_platform(platform: str) -> set[str]:
     return names
 
 
+def _stage_rel(path: Path) -> str:
+    """Repo-relative path usable as a tar arcname (never absolute)."""
+    return _repo_rel(path).lstrip("/")
+
+
+def _upload_local_configs(ssh_host: str, stage_dir: str, files: list[tuple[Path, str]]) -> None:
+    """Upload local config files to stage_dir on the remote via a tar pipe."""
+    import io
+    import subprocess
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for local, rel in files:
+            tar.add(local, arcname=rel)
+    subprocess.run(
+        ["ssh", ssh_host, f"mkdir -p {stage_dir} && tar -xf - -C {stage_dir}"],
+        input=buf.getvalue(), check=True,
+    )
+
+
 def _run_bench_rrun(args) -> None:
-    """Submit each benchmark/ablation run as a separate sbatch job."""
+    """Submit each benchmark/ablation run as a separate sbatch job.
+
+    The local benchmark + ablation YAMLs are uploaded to a staging dir on the
+    remote so each job runs with the local (possibly uncommitted) configs
+    instead of whatever the remote repo checkout contains after its git pull.
+    """
     import shlex
+    from datetime import datetime
 
     from omegaconf import OmegaConf as _OC
 
     platform = args.platform or "slurm"
     bench_stem = args.benchmark.stem
     cli_deps = [d.strip() for d in args.deps.split(",")] if getattr(args, "deps", None) else None
+
+    platform_cfg, _ = _load_platform_config(platform)
+    ssh_host = platform_cfg.get("ssh")
+    path_ws = platform_cfg.get("path_ws", "")
+    upload_configs = bool(ssh_host) and ssh_host is not False and bool(path_ws)
+    if not upload_configs:
+        print("WARNING: platform has no ssh host / path_ws — remote jobs will use "
+              "the repo-checkout configs on the remote, not the local ones")
 
     if args.ablation:
         combos = _ablation_combinations(args.ablation)
@@ -2044,17 +2079,10 @@ def _run_bench_rrun(args) -> None:
         # precedence: CLI -d > ablation platform.deps > platform config deps
         effective_deps = cli_deps if cli_deps is not None else ablation_deps
 
-        parts = ["o3b", "bench", "run",
-                 "-b", _repo_rel(args.benchmark),
-                 "-p", platform]
         if combo:
-            # pass each file individually; the remote `bench run` will receive a
-            # comma-joined -a arg so its own outer-product logic runs the same combo
-            parts += ["-a", ",".join(_repo_rel(f) for f in combo)]
             job_name = f"{bench_stem}__{'__'.join(f.stem for f in combo)}"
         else:
             job_name = bench_stem
-        remote_cmd = " ".join(shlex.quote(p) for p in parts)
 
         prefix = f"[{i:{width}}/{n_total}]"
         combo_key = tuple(f.stem for f in combo)
@@ -2067,7 +2095,29 @@ def _run_bench_rrun(args) -> None:
             print(f"{prefix} skip   {job_name}")
             continue
 
-        print(f"{prefix} submit {job_name}")
+        if upload_configs:
+            # stage the local YAMLs outside the remote repo (so the job's git
+            # pull stays clean) and point the remote command at the staged copies
+            ts = datetime.now().strftime("%m%d_%H%M%S")
+            stage = f"{path_ws}/.bench_cfgs/{job_name}_{ts}"
+            files = [(args.benchmark, _stage_rel(args.benchmark))]
+            files += [(f, _stage_rel(f)) for f in combo]
+            _upload_local_configs(ssh_host, stage, files)
+            bench_arg = f"{stage}/{_stage_rel(args.benchmark)}"
+            abl_args = [f"{stage}/{_stage_rel(f)}" for f in combo]
+        else:
+            bench_arg = _repo_rel(args.benchmark)
+            abl_args = [_repo_rel(f) for f in combo]
+
+        parts = ["o3b", "bench", "run", "-b", bench_arg, "-p", platform]
+        if combo:
+            # pass each file individually; the remote `bench run` will receive a
+            # comma-joined -a arg so its own outer-product logic runs the same combo
+            parts += ["-a", ",".join(abl_args)]
+        remote_cmd = " ".join(shlex.quote(p) for p in parts)
+
+        print(f"{prefix} submit {job_name}"
+              + (f" (local configs → {stage})" if upload_configs else ""))
         _run_bench_sbatch_cmd(platform, remote_cmd, job_name, deps_override=effective_deps)
         n_submitted += 1
         time.sleep(1)
