@@ -4,6 +4,16 @@ defaults:
 
 item_type: object # frame, object, scene, frame_object, scene_object
 
+object_modalities:
+  - mesh
+  - obj_ncds0c_tform4x4_obj
+  - obj_kpts3d
+  - obj_syms
+  - category
+  - verts3d
+  - verts3d_feats
+
+
 categories:
   # - backpack
   # - book

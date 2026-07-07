@@ -43,7 +43,7 @@ modalities:
   - category
 
 filter_has_kpts: true
-filter_count_max: 100 # per category if categories is applied
+filter_count_max: 1000 # per category if categories is applied
 
 
 transform:
