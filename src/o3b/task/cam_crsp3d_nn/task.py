@@ -830,8 +830,8 @@ class CamCrsp3DNNTask(OD3D_Task):
         pred_mesh_kpts, kpts_valid, is_correct,
     ) -> None:
         """Predicted meshes rendered as per-pixel NOCS-0c coordinates colorised
-        pixelwise via nocs_0c_to_rgb, from the GT viewpoints overlaid on the frame
-        RGB (row 1) and top-down (row 2), with the mesh-barycentric
+        pixelwise via nocs_0c_to_rgb, posed with the predicted poses and overlaid
+        on the frame RGB (row 1) and top-down (row 2), with the mesh-barycentric
         correspondences drawn on top → qualit.extra['correspondences_mesh']."""
         if qualit is None or is_correct is None or pred_mesh_kpts is None:
             return
@@ -884,8 +884,12 @@ class CamCrsp3DNNTask(OD3D_Task):
                     H_t, W_t = _img_hw(batch.trgt_rgb, b) if batch.trgt_rgb is not None else (256, 256)
                     src_k,  trgt_k  = batch.src_cam_intr4x4[b].float().cpu(), batch.trgt_cam_intr4x4[b].float().cpu()
                     src_t,  trgt_t  = src_ncds[b].float().cpu(), trgt_ncds[b].float().cpu()
-                    c_s, msk_s = _render_mesh_nocs(m_src,  src_t,  src_k,  H_s, W_s)
-                    c_t, msk_t = _render_mesh_nocs(m_trgt, trgt_t, trgt_k, H_t, W_t)
+                    # meshes are posed with the predicted poses (matching
+                    # _pred_mesh_corresp, so the drawn pred correspondences lie on
+                    # the rendered surface); GT keypoints stay projected with the
+                    # GT poses so they sit at their true image locations.
+                    c_s, msk_s = _render_mesh_nocs(m_src,  pred_src[b].float().cpu(),  src_k,  H_s, W_s)
+                    c_t, msk_t = _render_mesh_nocs(m_trgt, pred_trgt[b].float().cpu(), trgt_k, H_t, W_t)
                     if c_s is not None and c_t is not None:
                         left  = _nocs_on_bg(c_s, msk_s, _rgb_np(batch.src_rgb,  b, H_s, W_s), alpha=0.65)
                         right = _nocs_on_bg(c_t, msk_t, _rgb_np(batch.trgt_rgb, b, H_t, W_t), alpha=0.65)
