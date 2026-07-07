@@ -471,6 +471,7 @@ class CamCrsp3DNNTask(OD3D_Task):
 
     def __init__(self, qualit: bool = True, **kwargs):
         self.qualit = qualit
+        self._warned_missing: set[tuple] = set()
 
     def forward(self, batch: FrameObjectPairBatch, return_qualit: bool = True) -> Tuple[FrameObjectPairQuantBatch, FrameObjectPairQualitBatch]:
         from o3b.cv.geometry.transform import (
@@ -492,8 +493,22 @@ class CamCrsp3DNNTask(OD3D_Task):
         pred_src  = batch.src_pred_cam_tform4x4_obj  if batch.src_pred_cam_tform4x4_obj  is not None else src_ncds
         pred_trgt = batch.trgt_pred_cam_tform4x4_obj if batch.trgt_pred_cam_tform4x4_obj is not None else trgt_ncds
 
-        required = (src_kpts, trgt_kpts, src_ncds, trgt_ncds, pred_src, pred_trgt, trgt_obj_size)
-        if any(x is None for x in required):
+        required = {
+            "src_obj_kpts3d":             src_kpts,
+            "trgt_obj_kpts3d":            trgt_kpts,
+            "src_cam_tform4x4_obj_ncds":  src_ncds,
+            "trgt_cam_tform4x4_obj_ncds": trgt_ncds,
+            "pred_cam_tform4x4_obj (src)":  pred_src,
+            "pred_cam_tform4x4_obj (trgt)": pred_trgt,
+            "trgt_obj_size":              trgt_obj_size,
+        }
+        missing = tuple(name for name, x in required.items() if x is None)
+        if missing:
+            if missing not in self._warned_missing:
+                self._warned_missing.add(missing)
+                print(f"WARNING: CamCrsp3DNNTask skipping batch — required batch fields "
+                      f"are None: {', '.join(missing)}. No metrics will be produced for "
+                      f"such batches (check dataset modalities / sharded cache contents).")
             return FrameObjectPairQuantBatch(), FrameObjectPairQualitBatch()
 
         B, K, _ = src_kpts.shape

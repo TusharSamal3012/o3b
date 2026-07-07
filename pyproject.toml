@@ -10,7 +10,7 @@ dependencies = [
     "gdown",
     "hydra-core",
     "omegaconf",
-    "opencv-python",
+    "opencv-python<5",  # opencv 5.0 wheels dropped OpenEXR support (depth/mask .exr loading)
     "torchvision",
     "open3d",
     "libigl",
