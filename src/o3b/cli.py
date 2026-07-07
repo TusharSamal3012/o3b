@@ -426,9 +426,9 @@ def _run_platform_setup(args):
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
     deps                 = list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
-    install_diff3f       = "diff3f" in deps
-    install_densematcher = "densematcher" in deps
-    install_genpose2     = "genpose2" in deps
+    # setup_slurm.sh reads one INSTALL_<DEP> flag per dep (INSTALL_MORPHEUS, …)
+    # and defaults each to false, so only the enabled ones need exporting.
+    install_flags        = {f"INSTALL_{dep.upper()}": "true" for dep in deps}
     branch         = cfg.get("branch", "main")
     pull           = cfg.get("pull", True)
     pull_submodules  = cfg.get("pull_submodules", True)
@@ -496,9 +496,7 @@ def _run_platform_setup(args):
         "PATH_CUDA":       path_cuda,
         "PYTHON_VERSION":  python_version,
         "TORCH_VERSION":   torch_version,
-        "INSTALL_DIFF3F":        "true" if install_diff3f else "false",
-        "INSTALL_DENSEMATCHER":  "true" if install_densematcher else "false",
-        "INSTALL_GENPOSE2":      "true" if install_genpose2 else "false",
+        **install_flags,
         "DEPS_TAG":              deps_tag,
         "REPO_URL":        repo_url,   # housecorr3d HTTPS URL with token
         "REPO_NAME":       repo_name,  # derived from remote URL, e.g. HouseCorr3Dv2
@@ -791,7 +789,7 @@ def _run_platform_overview(args):
 
 
 def _platform_srun_context(platform: str):
-    """Return (ssh_host, srun_base, repo_path, venv_path, path_cuda, path_ws) for srun commands."""
+    """Return (ssh_host, srun_base, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache) for srun commands."""
     import os, re, subprocess
     from omegaconf import OmegaConf
 
@@ -818,14 +816,13 @@ def _platform_srun_context(platform: str):
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
     deps                 = list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
-    install_diff3f       = "true" if "diff3f" in deps else "false"
-    install_densematcher = "true" if "densematcher" in deps else "false"
-    install_genpose2     = "true" if "genpose2" in deps else "false"
+    install_flags        = {f"INSTALL_{dep.upper()}": "true" for dep in deps}
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
     pull_subs      = str(cfg.get("pull_submodules", True)).lower()
     skip_subs      = " ".join(str(s) for s in list(cfg.get("skip_submodules", []) or []))
+    hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
 
     cuda_tag  = "cu" + os.path.basename(path_cuda).replace("cuda-", "").replace(".", "")
     py_tag    = "py" + python_version.replace(".", "")
@@ -883,9 +880,7 @@ def _platform_srun_context(platform: str):
         f",PATH_CUDA={path_cuda}"
         f",PYTHON_VERSION={python_version}"
         f",TORCH_VERSION={torch_version}"
-        f",INSTALL_DIFF3F={install_diff3f}"
-        f",INSTALL_DENSEMATCHER={install_densematcher}"
-        f",INSTALL_GENPOSE2={install_genpose2}"
+        + "".join(f",{k}={v}" for k, v in install_flags.items()) +
         f",REPO_URL={repo_url}"
         f",REPO_NAME={repo_name}"
         f",SETUP={setup}"
@@ -899,10 +894,11 @@ def _platform_srun_context(platform: str):
         f",DEPS_TAG={deps_tag}"
     )
 
-    return ssh_host, srun, repo_path, venv_path, path_cuda, path_ws
+    return ssh_host, srun, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache
 
 
-def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str) -> list[str]:
+def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str,
+                    hf_datasets_cache: str = "") -> list[str]:
     """Shell lines that run on the compute node before the actual command.
 
     Order: CUDA env → conditional setup script → conditional pull/checkout
@@ -918,11 +914,9 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
         f"export LD_LIBRARY_PATH={path_cuda}/lib64:${{LD_LIBRARY_PATH:-}}",
         f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
         f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/x86_64-linux/lib",
-        # HF datasets writes its Arrow build cache to ~/.cache by default, which
-        # exceeds the home quota on the cluster — use node-local /tmp instead
-        # (the final shards are written via save_to_disk to the preprocess dir).
-        "export HF_DATASETS_CACHE=/tmp/hf_datasets",
     ]
+    if hf_datasets_cache:
+        lines.append(f"export HF_DATASETS_CACHE={hf_datasets_cache}")
     # acquire the same directory lock used by setup_slurm.sh so concurrent
     # srun jobs don't race on git pull / submodule update / venv install
     if path_ws:
@@ -978,11 +972,11 @@ def _run_platform_runi(args):
     import subprocess
     import uuid
 
-    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(args.platform)
+    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache = _platform_srun_context(args.platform)
 
     # Write a small activation script so bash --init-file can source it without
     # wrapping srun in a bash -c subshell (which breaks the PTY).
-    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws)
+    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws, hf_datasets_cache)
     remote_init = f"{path_ws}/.od3d_init" if path_ws else "~/.od3d_init"
     subprocess.run(
         ["ssh", ssh_host, f"cat > {remote_init}"],
@@ -1078,7 +1072,7 @@ def _run_platform_setupi(args):
     import re
     import subprocess
 
-    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws = _platform_srun_context(args.platform)
+    ssh_host, srun, repo_path, venv_path, path_cuda, path_ws, hf_datasets_cache = _platform_srun_context(args.platform)
 
     cfg, _ = _load_platform_config(args.platform)
     username = cfg.get("username", "")
@@ -1110,7 +1104,7 @@ def _run_platform_setupi(args):
 
     _scp(setup_script_local, remote_setup)
 
-    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws)
+    init_lines = _srun_env_lines(path_cuda, venv_path, repo_path, path_ws, hf_datasets_cache)
     init_lines += [
         "",
         f'echo "================================================================"',
@@ -1847,14 +1841,13 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     torch_version  = str(cfg.get("torch_version", "2.6.0"))
     deps                 = deps_override if deps_override is not None else list(cfg.get("deps", []) or [])
     deps_tag             = "_".join(sorted(deps)) if deps else ""
-    install_diff3f       = "true" if "diff3f" in deps else "false"
-    install_densematcher = "true" if "densematcher" in deps else "false"
-    install_genpose2     = "true" if "genpose2" in deps else "false"
+    install_flags        = {f"INSTALL_{dep.upper()}": "true" for dep in deps}
     setup          = "true" if cfg.get("setup", False) else "false"
     branch         = str(cfg.get("branch", "main"))
     pull           = str(cfg.get("pull", True)).lower()
     pull_subs      = str(cfg.get("pull_submodules", True)).lower()
     path_home      = cfg.get("path_home", path_ws)
+    hf_datasets_cache = cfg.get("path_hf_datasets_cache", "") or ""
 
     cuda_tag  = "cu" + os.path.basename(path_cuda).replace("cuda-", "").replace(".", "")
     py_tag    = "py" + python_version.replace(".", "")
@@ -1891,9 +1884,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
         "PATH_CUDA":       path_cuda,
         "PYTHON_VERSION":  python_version,
         "TORCH_VERSION":   torch_version,
-        "INSTALL_DIFF3F":        install_diff3f,
-        "INSTALL_DENSEMATCHER":  install_densematcher,
-        "INSTALL_GENPOSE2":      install_genpose2,
+        **install_flags,
         "DEPS_TAG":              deps_tag,
         "REPO_URL":        repo_url,
         "REPO_NAME":       repo_name,
@@ -1913,7 +1904,7 @@ def _run_bench_sbatch_cmd(platform: str, command: str, job_name: str, deps_overr
     # run script: env preamble (CUDA, venv, cd, setup/pull) + the actual command
     run_script_content = "\n".join(
         ["#!/usr/bin/env bash", "set -euo pipefail", ""] +
-        _srun_env_lines(path_cuda, venv_path, repo_path, path_ws) +
+        _srun_env_lines(path_cuda, venv_path, repo_path, path_ws, hf_datasets_cache) +
         ["", command]
     )
     remote_run_script = f"{path_ws}/.bench_run_{job_name}_{ts}.sh"

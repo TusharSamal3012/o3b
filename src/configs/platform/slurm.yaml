@@ -27,6 +27,11 @@ path_cuda: /usr/local/cuda-12.4
 path_datasets_raw: /work/dlclarge1/sommerl-od3d/datasets # sshfs maythux@192.168.xx.xx:/home/maythuxServ/Mounted ~/remoteDir
 path_datasets_preprocess: /work/dlclarge1/sommerl-od3d/datasets # for student: /misc/student/srinivap/datasets_preprocess
 
+# HF datasets writes its Arrow build cache to ~/.cache by default, which
+# exceeds the home quota on the cluster — use node-local /tmp instead
+# (the final shards are written via save_to_disk to path_datasets_preprocess).
+path_hf_datasets_cache: /tmp/hf_datasets
+
 partition:  alldlc_gpu-rtx2080 # lmb_gpu-rtx2080 # lmb_gpu-teslaP100 lmb_gpu-1080ti, lmb_gpu-rtx2080, testdlc_gpu-rtx2080, alldlc_gpu-rtx3080, alldlc_gpu-rtx2080, lmbdlc_gpu-rtx2080
 
 # 1. lmb_gpu-rtx2080 : usually empty, only 3 slots
