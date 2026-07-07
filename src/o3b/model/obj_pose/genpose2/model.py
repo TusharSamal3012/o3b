@@ -118,7 +118,15 @@ class GenPose2(OD3D_Model):
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
-            urllib.request.urlretrieve(self.ckpt_url, tmp_path, _progress)
+            try:
+                urllib.request.urlretrieve(self.ckpt_url, tmp_path, _progress)
+            except urllib.error.HTTPError as e:
+                raise FileNotFoundError(
+                    f"GenPose2 checkpoint download failed ({e}). The default "
+                    f"ckpt_url is a signed Dropbox link that expires — place the "
+                    f"checkpoints under {self.genpose2_fpath} manually or pass a "
+                    f"fresh ckpt_url.",
+                ) from e
             print()
             with zipfile.ZipFile(tmp_path) as zf:
                 # skip the leading "/" / absolute-path entry in the archive

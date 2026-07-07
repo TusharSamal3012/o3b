@@ -54,6 +54,8 @@ def _run_bench_run_with_cfg(run_raw: dict, run_name: str) -> None:
             method = build_method(MethodConfig.from_dict(dict(method_cfg)))
             print(f"Method:  {cls_name}")
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             print(f"WARNING: could not build method {cls_name!r} ({exc}); "
                   f"running task on raw batch (GT/oracle).")
 

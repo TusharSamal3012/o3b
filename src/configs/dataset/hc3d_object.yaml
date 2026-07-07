@@ -4,6 +4,58 @@ defaults:
 
 item_type: object # frame, object, scene, frame_object, scene_object
 
+categories:
+  # - backpack
+  # - book
+  # - bottle
+  # - box
+  # - bread
+  # - coconut
+  # - conch
+  # - corn
+  # - dinosaur
+  # - dish
+  # - doll
+  # - egg
+  # - eraser
+  # - facial_cream
+  # - flower_pot
+  # - glasses_case
+  # - hair_dryer
+  # - hamburger
+  # - handbag
+  # - hand_cream
+  # - knife
+  # - lemon
+  # - light
+  # - lotus_root
+  # - mango
+  # - mangosteen
+  # - medicine_bottle
+  # - mouse
+  # - mug
+  # - orange
+  # - pillow
+  # - pomegranate
+  # - power_strip
+  # - remote_control
+  # - sausage
+  # - shampoo
+  # - shoe
+  # - shrimp
+  # - teapot
+  # - tooth_brush
+  # - tooth_paste
+  # - toy_animals
+  # - toy_boat
+  # - toy_bus
+  # - toy_car
+  # - toy_motorcycle
+  # - toy_plane
+  # - toy_train
+  # - toy_truck
+  # - wallet
+
 #mesh_type: "mc16_vuni4_r256_fdinov2s"
 #mesh_type: "mc16_vuni4_r256_fdm"    # DenseMatcher (SDDINO, 768-dim) — set checkpoint paths in configs/model/dm.yaml first
 #mesh_type: "mc16_vuni4_r256_fdmmv"
