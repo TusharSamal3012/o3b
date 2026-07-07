@@ -918,6 +918,10 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
         f"export LD_LIBRARY_PATH={path_cuda}/lib64:${{LD_LIBRARY_PATH:-}}",
         f"export CPATH=${{CPATH:-}}:{path_cuda}/targets/x86_64-linux/include",
         f"export LIBRARY_PATH=${{LIBRARY_PATH:-}}:{path_cuda}/targets/x86_64-linux/lib",
+        # HF datasets writes its Arrow build cache to ~/.cache by default, which
+        # exceeds the home quota on the cluster — use node-local /tmp instead
+        # (the final shards are written via save_to_disk to the preprocess dir).
+        "export HF_DATASETS_CACHE=/tmp/hf_datasets",
     ]
     # acquire the same directory lock used by setup_slurm.sh so concurrent
     # srun jobs don't race on git pull / submodule update / venv install
