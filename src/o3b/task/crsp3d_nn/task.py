@@ -210,6 +210,59 @@ def _render_part_imgs(
     return torch.stack(imgs_out) if imgs_out else None
 
 
+# ── feature-colored mesh rendering ─────────────────────────────────────────────
+
+def _feat_vert_colors(feats: Tensor) -> Tensor:
+    """(V, F) → (V, 3) float32 in [0, 1].
+
+    F <= 3: per-channel min-max normalized features directly (zero-padded to 3
+            channels if F < 3).
+    F > 3:  first 3 PCA components, per-channel min-max normalized.
+    """
+    V, F = feats.shape
+    flat = torch.nan_to_num(feats.float().cpu(), nan=0.0, posinf=0.0, neginf=0.0)
+    if F > 3:
+        centered = flat - flat.mean(dim=0)
+        _, _, Vmat = torch.pca_lowrank(centered, q=3, niter=4)
+        colors = centered @ Vmat[:, :3]
+    else:
+        colors = flat if F == 3 else torch.cat([flat, torch.zeros(V, 3 - F)], dim=1)
+    colors = colors.clone()
+    for c in range(3):
+        ch  = colors[:, c]
+        rng = ch.max() - ch.min()
+        colors[:, c] = (ch - ch.min()) / rng if rng > 0 else 0.5
+    return colors.clamp(0, 1)
+
+
+def _feat_colored_mesh_pairs(
+    src_feats:   Tensor,  # (B, V_src, F)
+    trgt_feats:  Tensor,  # (B, V_trgt, F)
+    src_meshes:  list,
+    trgt_meshes: list,
+) -> "Tuple[list, list]":
+    """Return (src_meshes, trgt_meshes) copies with vert_colors replaced by
+    per-vertex feature colors (see _feat_vert_colors), computed jointly over
+    src+trgt features so the two meshes stay color-comparable."""
+    from dataclasses import replace as _dc_replace
+
+    B = src_feats.shape[0]
+    src_out, trgt_out = [], []
+    for b in range(B):
+        sm, tm = src_meshes[b], trgt_meshes[b]
+        if sm is None or tm is None:
+            src_out.append(sm)
+            trgt_out.append(tm)
+            continue
+        V_src, V_trgt = sm.verts.shape[0], tm.verts.shape[0]
+        sf = src_feats[b, :V_src].float().cpu()
+        tf = trgt_feats[b, :V_trgt].float().cpu()
+        combined = _feat_vert_colors(torch.cat([sf, tf], dim=0))
+        src_out.append(_dc_replace(sm, vert_colors=combined[:V_src]))
+        trgt_out.append(_dc_replace(tm, vert_colors=combined[V_src:]))
+    return src_out, trgt_out
+
+
 # ── qualitative rendering ─────────────────────────────────────────────────────
 
 def _render_corr_imgs(
@@ -222,6 +275,7 @@ def _render_corr_imgs(
     kpts_valid:      Tensor,            # (B, K) bool
     left_verts_mask:  Optional[Tensor],
     right_verts_mask: Optional[Tensor],
+    right_kpts_gt: Optional[Tensor] = None,  # (B, K, 3)  GT target positions
     left_meshes:  Optional[list] = None,
     right_meshes: Optional[list] = None,
     H: int = 256,
@@ -229,9 +283,11 @@ def _render_corr_imgs(
 ) -> Optional[Tensor]:
     """Return (B, 3, 2H, 2W) float32 [0,1] images.
 
-    Left panel:  source mesh with GT source keypoints.
-    Right panel: target mesh with predicted target positions.
-    Color: green = Euclidean error < 0.1 * trgt_max_dim, red = wrong.
+    Left panel:  source mesh with GT source keypoints (filled dot, per-keypoint color).
+    Right panel: target mesh with the GT target position (hollow ring, same color)
+                 and the predicted target position (filled dot, same color).
+    Line color: green = Euclidean error < 0.1 * trgt_max_dim, blue = wrong — matches
+    CamCrsp3DNNTask's _draw_corr_panels styling.
     """
     try:
         import numpy as np
@@ -242,12 +298,14 @@ def _render_corr_imgs(
             get_default_camera_intrinsics_from_img_size,
         )
         from o3b.cv.geometry.transform import get_cam_tform4x4_obj_for_viewpoints_count
+        from o3b.cv.visual.draw import get_colors
     except ImportError:
         return None
 
     B, K, _ = left_kpts.shape
     imgs_out = []
     r_dot = max(4, H // 52)
+    kpt_colors = (get_colors(K) * 255).round().int().tolist()  # (K, 3) distinct per-keypoint
 
     cam_ts = get_cam_tform4x4_obj_for_viewpoints_count(viewpoints_count=2, dist=5.0).float()
     cam_k  = get_default_camera_intrinsics_from_img_size(W, H, fov_x=25).float()
@@ -274,6 +332,7 @@ def _render_corr_imgs(
     for b in range(B):
         lk  = left_kpts[b].float().cpu()
         rk  = right_kpts[b].float().cpu()
+        rk_gt = right_kpts_gt[b].float().cpu() if right_kpts_gt is not None else None
         vm  = kpts_valid[b].cpu()
         threshold  = 0.1 * trgt_max_dim[b].item()
         is_correct = euc_dist[b].cpu() < threshold
@@ -291,19 +350,27 @@ def _render_corr_imgs(
 
             lu, lv = project(lk, cam_t)
             ru, rv = project(rk, cam_t)
+            if rk_gt is not None:
+                gu, gv = project(rk_gt, cam_t)
 
             for k_i in range(K):
                 if not bool(vm[k_i]):
                     continue
-                color = (0, 180, 0) if bool(is_correct[k_i]) else (0, 0, 200)
+                line_color = (0, 180, 0) if bool(is_correct[k_i]) else (0, 100, 220)
+                kpt_color  = tuple(kpt_colors[k_i])
                 lx = int(np.clip(lu[k_i], 0, W - 1))
                 ly = int(np.clip(lv[k_i], 0, H - 1))
                 rx = int(np.clip(ru[k_i], 0, W - 1)) + W
                 ry = int(np.clip(rv[k_i], 0, H - 1))
-                draw.line([(lx, ly), (rx, ry)], fill=color, width=1)
+                draw.line([(lx, ly), (rx, ry)], fill=line_color, width=1)
+                if rk_gt is not None:
+                    gx = int(np.clip(gu[k_i], 0, W - 1)) + W
+                    gy = int(np.clip(gv[k_i], 0, H - 1))
+                    draw.ellipse([(gx - r_dot, gy - r_dot), (gx + r_dot, gy + r_dot)],
+                                 outline=kpt_color, width=2)
                 for px, py in [(lx, ly), (rx, ry)]:
                     draw.ellipse([(px - r_dot, py - r_dot), (px + r_dot, py + r_dot)],
-                                 fill=color, outline=(0, 0, 0))
+                                 fill=kpt_color, outline=(0, 0, 0))
             rows.append(np.array(pil))
 
         canvas = np.concatenate(rows, axis=0).astype(np.float32) / 255.0
@@ -612,6 +679,7 @@ class Crsp3DNNTask(OD3D_Task):
                 kpts_valid       = kpts_valid,
                 left_verts_mask  = src_verts_mask,
                 right_verts_mask = trgt_verts_mask,
+                right_kpts_gt    = gt_trgt_kpt_pos,
                 left_meshes      = batch.src_meshes,
                 right_meshes     = batch.trgt_meshes,
             )
@@ -626,8 +694,30 @@ class Crsp3DNNTask(OD3D_Task):
                 batch.src_meshes, batch.trgt_meshes,
             )
 
+        # ── qualitative: keypoint correspondences on feature-colored meshes ───
+        feat_imgs = None
+        if (has_kpts and pred_trgt_kpt_pos is not None
+                and batch.src_meshes is not None and batch.trgt_meshes is not None):
+            feat_src_meshes, feat_trgt_meshes = _feat_colored_mesh_pairs(
+                src_feats, trgt_feats, batch.src_meshes, batch.trgt_meshes,
+            )
+            feat_imgs = _render_corr_imgs(
+                left_verts       = src_verts,
+                right_verts      = trgt_verts,
+                left_kpts        = src_kpts.float(),
+                right_kpts       = pred_trgt_kpt_pos,
+                euc_dist         = kpts_trgt_euc_dist,
+                trgt_max_dim     = trgt_max_dim,
+                kpts_valid       = kpts_valid,
+                left_verts_mask  = src_verts_mask,
+                right_verts_mask = trgt_verts_mask,
+                right_kpts_gt    = gt_trgt_kpt_pos,
+                left_meshes      = feat_src_meshes,
+                right_meshes     = feat_trgt_meshes,
+            )
+
         quant  = ObjectPairQuantBatch(**quant_kpts, **quant_parts)
-        qualit = ObjectPairQualitBatch(imgs=qualit_imgs, part_imgs=part_imgs)
+        qualit = ObjectPairQualitBatch(imgs=qualit_imgs, part_imgs=part_imgs, feat_imgs=feat_imgs)
         if has_kpts:
             qualit.trgt_src_vert_corr      = pred_trgt_kpt_vert
             qualit.trgt_src_vert_corr_mask = kpts_valid

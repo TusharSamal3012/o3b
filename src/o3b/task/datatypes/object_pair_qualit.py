@@ -25,6 +25,11 @@ class ObjectPairQualitBatch:
     #   right = target mesh colored by nearest-source-vertex part label (feature NN)
     part_imgs:                Optional[Tensor] = None  # (B, 3, H, W)  float32 [0,1]
 
+    # keypoint correspondence images, but meshes are colored by per-vertex
+    # features (normalized directly if <=3 dims, else first 3 PCA components)
+    # instead of RGB — same layout/coloring rules as `imgs`
+    feat_imgs:                Optional[Tensor] = None  # (B, 3, H, W)  float32 [0,1]
+
     # extra per-task qualitative outputs
     extra: dict = field(default_factory=dict)
 
@@ -51,4 +56,5 @@ class ObjectPairQualitBatch:
 
         _log_tensor_imgs(self.imgs,      f"{prefix}/correspondences")
         _log_tensor_imgs(self.part_imgs, f"{prefix}/part_correspondences")
+        _log_tensor_imgs(self.feat_imgs, f"{prefix}/feat_correspondences")
         return out
