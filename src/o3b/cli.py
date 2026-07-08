@@ -649,7 +649,7 @@ def _overview_tui(stdscr, jobs: list, ssh_host: str, title: str):
         ("ExitCode",   8, ">"),
         ("Elapsed",   10, "<"),
         ("Start",     19, "<"),
-        ("Partition", 12, "<"),
+        ("Partition", 20, "<"),
     ]
 
     def fmt_row(job):

@@ -1,10 +1,42 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 import igl
+import numpy as np
 from torch import Tensor
 import torch
+
+
+def weld_mesh(
+    verts: np.ndarray, faces: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Merge exactly-coincident vertices (e.g. xatlas UV-seam duplicates).
+
+    Textured mc* meshes from convert_mesh_to_mc duplicate vertices along UV
+    seams, cutting the closed marching-cubes surface into charts; connectivity-
+    based matching (LBO eigenbasis, geodesics) then sees the seams as boundary
+    cuts. Welding restores watertight connectivity.
+
+    Returns:
+        verts_w: (Nw, 3) welded vertices (first occurrence per position)
+        faces_w: (F, 3) faces remapped to welded indices
+        inv:     (N,) welded index of each input vertex
+        rep:     (Nw,) input index of each welded vertex's representative
+    """
+    _, first, inv = np.unique(
+        verts.round(decimals=6), axis=0, return_index=True, return_inverse=True
+    )
+    inv = inv.reshape(-1)
+    return verts[first], inv[faces], inv, first
+
+
+def mean_by_index(values: np.ndarray, index: np.ndarray, n: int) -> np.ndarray:
+    """Group-mean of (N, F) values over an (N,) index map into n groups."""
+    out = np.zeros((n, values.shape[1]), dtype=np.float64)
+    np.add.at(out, index, values.astype(np.float64))
+    counts = np.bincount(index, minlength=n).astype(np.float64)
+    return out / counts[:, None]
 
 
 @dataclass
@@ -152,7 +184,7 @@ def _extract_vert_feats(
     print(feature_model_name)
     
     # ── Models that do their own rendering (diff3f, densematcher/dm) ────────────
-    _SELF_RENDERING = {"diff3f", "dm", "dmmv"}
+    _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip"}
     if feature_model_name.lower() in _SELF_RENDERING:
         from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch

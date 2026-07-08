@@ -106,6 +106,21 @@ class DenseMatcherModel(OD3D_Model):
 
     forward(ObjectBatch) -> ObjectBatch with verts3d_feats (B, V, width) set.
     Requires the mesh to be present in the ObjectBatch.
+
+    mesh_weld: textured mc* meshes carry xatlas UV-seam vertex duplicates that
+    cut the surface into charts, which the DiffusionNet Laplacian sees as
+    boundary cuts. If true, the mesh is welded back to watertight
+    connectivity (housecorr3dv2.method.mesh_match_utils.weld_mesh, mirroring
+    FunctionalMapsMethod) before feature extraction: per-vertex colour is
+    resolved (sampled from the texture atlas if needed) and averaged over
+    welded duplicates (mean_by_index), the whole pipeline then runs on the
+    welded mesh, and the output features are broadcast back to full
+    resolution via the weld index map.
+
+    mesh_flip: if true, face winding is flipped before extraction — useful to
+    correct/ablate vertex-normal orientation (and thus DiffusionNet operator
+    sign) when a mesh's winding convention doesn't match what this pipeline
+    expects.
     """
 
     def __init__(
@@ -119,6 +134,8 @@ class DenseMatcherModel(OD3D_Model):
         num_blocks: int = 8,
         use_mv_features: bool = False,
         freeze: bool = True,
+        mesh_weld: bool = False,
+        mesh_flip: bool = False,
     ):
         super().__init__()
         self.pretrained_upsampler_path = pretrained_upsampler_path
@@ -130,6 +147,8 @@ class DenseMatcherModel(OD3D_Model):
         self.num_blocks = num_blocks
         self.use_mv_features = use_mv_features
         self.freeze = freeze
+        self.mesh_weld = mesh_weld
+        self.mesh_flip = mesh_flip
         # out_dim: 768 (raw SDDINO mv_features) or width (DiffusionNet output)
         self.out_dim = 768 if use_mv_features else width
         self._mesh_featurizer = None
@@ -180,7 +199,42 @@ class DenseMatcherModel(OD3D_Model):
 
         verts = mesh.verts.float()  # (V, 3)
         faces = mesh.faces.long()   # (F, 3)
-        V = verts.shape[0]
+        V = verts.shape[0]          # full (pre-weld) vertex count — output resolution
+
+        if self.mesh_flip:
+            faces = faces[:, [0, 2, 1]]
+
+        weld_inv = None
+        if self.mesh_weld:
+            from o3b.data.datatypes.mesh import mean_by_index, weld_mesh
+
+            verts_np, faces_np = verts.detach().cpu().numpy(), faces.detach().cpu().numpy()
+            verts_w, faces_w, weld_inv, _ = weld_mesh(verts_np, faces_np)
+
+            vert_colors = None
+            if mesh.vert_colors is not None:
+                vert_colors = mean_by_index(
+                    mesh.vert_colors.detach().cpu().float().numpy(), weld_inv, len(verts_w)
+                )
+            elif mesh.texture is not None and mesh.verts_uvs is not None:
+                # sample per-vertex colour from the texture atlas, then
+                # weld-average over seam duplicates
+                uvs = mesh.verts_uvs.detach().cpu().float()
+                grid = (uvs * 2 - 1).view(1, 1, -1, 2)
+                sampled = torch.nn.functional.grid_sample(
+                    mesh.texture.detach().cpu().unsqueeze(0).float(), grid,
+                    mode="bilinear", align_corners=True, padding_mode="border",
+                )  # (1, 3, 1, V)
+                vert_rgb = sampled[0, :, 0, :].T.numpy()
+                vert_colors = mean_by_index(vert_rgb, weld_inv, len(verts_w))
+
+            from o3b.data.datatypes.mesh import Mesh
+            mesh = Mesh(
+                verts=torch.from_numpy(verts_w).float(),
+                faces=torch.from_numpy(faces_w).long(),
+                vert_colors=torch.from_numpy(vert_colors).float() if vert_colors is not None else None,
+            )
+            verts, faces = mesh.verts, mesh.faces
 
         # Normalise to [-0.15, 0.15] (DenseMatcher expects scale ≈ 0.3 on largest axis)
         center = verts.mean(dim=0)
@@ -237,6 +291,8 @@ class DenseMatcherModel(OD3D_Model):
 
         raw = mv_features if self.use_mv_features else out_norm
         feats = torch.nan_to_num(raw.float().cpu(), nan=0.0, posinf=0.0, neginf=0.0)
+        if weld_inv is not None:
+            feats = feats[torch.from_numpy(weld_inv).long()]  # welded (Nw) -> full (V)
         B = batch.verts3d.shape[0] if batch.verts3d is not None else 1
         batch.verts3d_feats = feats.unsqueeze(0).expand(B, V, -1).contiguous()
         return batch
