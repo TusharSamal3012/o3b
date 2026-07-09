@@ -906,7 +906,11 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
     The SETUP / PULL / PULL_SUBMODULES / BRANCH values come from the srun
     --export env vars so the same script works regardless of platform config.
     """
+    def _echo(msg: str, indent: str = "") -> str:
+        return f'{indent}echo "[o3b-init $(date +%T)] {msg}"'
+
     lines = [
+        _echo("sourcing ~/.bashrc"),
         "[ -f ~/.bashrc ] && . ~/.bashrc",
         f"export CUDA_HOME={path_cuda}",
         f"export CUDACXX={path_cuda}/bin/nvcc",
@@ -921,29 +925,38 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
     # srun jobs don't race on git pull / submodule update / venv install
     if path_ws:
         lines += [
+            _echo("waiting for setup_slurm.lock (held by another concurrent job?)"),
             f'exec 200>{path_ws}/setup_slurm.lock',
             f'flock -x 200',
+            _echo("lock acquired"),
         ]
     # run full setup script (e.g. install deps) when SETUP=true
     if path_ws:
         lines += [
             f'if [ "${{SETUP:-false}}" = "true" ]; then',
+            _echo("running setup_slurm.sh (SETUP=true)", "    "),
             f'    bash {path_ws}/setup_slurm.sh',
+            _echo("setup_slurm.sh done", "    "),
             f'fi',
         ]
     # checkout branch and pull when PULL=true
     if repo_path:
         lines += [
             f'if [ "${{PULL:-false}}" = "true" ]; then',
+            _echo(f"git fetch (repo={repo_path}, proxy=${{HTTPS_PROXY:-none}})", "    "),
             f'    git -C {repo_path} fetch',
+            _echo("git checkout ${BRANCH:-main}", "    "),
             f'    git -C {repo_path} checkout "${{BRANCH:-main}}"',
+            _echo("git pull", "    "),
             f'    git -C {repo_path} pull',
+            _echo("git pull done", "    "),
             f'fi',
             f'if [ "${{PULL_SUBMODULES:-false}}" = "true" ]; then',
             f'    if [ -n "${{GITHUB_TOKEN:-}}" ]; then',
             f'        git config --global url."https://${{GITHUB_TOKEN}}@github.com/".insteadOf "https://github.com/"',
             f'    fi',
             f'    if [ -z "${{SKIP_SUBMODULES:-}}" ]; then',
+            _echo("submodule update --init --recursive (all submodules)", "        "),
             f'        git -C {repo_path} submodule update --init --recursive',
             f'    else',
             f'        git -C {repo_path} submodule init',
@@ -953,18 +966,27 @@ def _srun_env_lines(path_cuda: str, venv_path: str, repo_path: str, path_ws: str
             f'                [ "$sub" = "$s" ] && _skip=true && break',
             f'            done',
             f'            if [ "$_skip" = "false" ]; then',
+            _echo("submodule update --init --recursive -- $sub", "                "),
             f'                git -C {repo_path} submodule update --init --recursive -- "$sub"',
             f'            fi',
             f'        done',
             f'    fi',
+            _echo("submodule update done", "    "),
             f'fi',
         ]
     if path_ws:
-        lines.append('exec 200>&-')
+        lines += [
+            f'exec 200>&-',
+            _echo("lock released"),
+        ]
     if venv_path:
-        lines.append(f"[ -d {venv_path} ] && source {venv_path}/bin/activate")
+        lines += [
+            _echo(f"activating venv {venv_path}"),
+            f"[ -d {venv_path} ] && source {venv_path}/bin/activate",
+        ]
     if repo_path:
         lines.append(f"cd {repo_path}")
+    lines.append(_echo("init done, dropping into shell"))
     return lines
 
 
@@ -1627,15 +1649,29 @@ def _run_bench_viz(args) -> None:
     import matplotlib.pyplot as plt
     import numpy as np
 
-    # ── two ablation directions → heatmap ─────────────────────────────
-    if args.ablation and len(args.ablation) == 2:
-        _abl_base = Path.cwd() / "src" / "configs" / "ablation"
-        def _abl_col(a: Path) -> str:
-            try:
-                return str(a.relative_to(_abl_base))
-            except ValueError:
-                return a.name
-        col_a, col_b = [_abl_col(a) for a in args.ablation]
+    # ── determine which ablation axes actually vary ────────────────────
+    # An ablation entry that points at a single YAML file (not a directory)
+    # only ever contributes one value, so it's a fixed axis, not a plotted one.
+    _abl_base = Path.cwd() / "src" / "configs" / "ablation"
+    def _abl_col(a: Path) -> str:
+        try:
+            return str(a.relative_to(_abl_base))
+        except ValueError:
+            return a.name
+
+    abl_cols = [_abl_col(a) for a in args.ablation] if args.ablation else []
+    changing_cols = [
+        c for c in abl_cols
+        if len({r[c] for r in plot_rows if c in r}) > 1
+    ]
+    fixed_cols = [c for c in abl_cols if c not in changing_cols]
+    fixed_desc = ", ".join(
+        f"{c}={next(r[c] for r in plot_rows if c in r)}" for c in fixed_cols
+    )
+
+    # ── two changing ablation axes → 2-D grid heatmap ───────────────────
+    if len(changing_cols) == 2:
+        col_a, col_b = changing_cols
 
         vals_a = sorted({r[col_a] for r in plot_rows if col_a in r})
         vals_b = sorted({r[col_b] for r in plot_rows if col_b in r})
@@ -1670,7 +1706,10 @@ def _run_bench_viz(args) -> None:
         ax.set_yticklabels(yticks, fontsize=8)
         ax.set_xlabel(col_b, fontsize=9)
         ax.set_ylabel(col_a, fontsize=9)
-        ax.set_title(f"{bench_stem}  —  {metric}", fontsize=10)
+        title = f"{bench_stem}  —  {metric}"
+        if fixed_desc:
+            title += f"\n(fixed: {fixed_desc})"
+        ax.set_title(title, fontsize=10)
 
         # separator lines before the average row/column
         ax.axhline(na - 0.5, color="white", linewidth=1.5, linestyle="--")
@@ -1689,8 +1728,12 @@ def _run_bench_viz(args) -> None:
         plt.show()
         return
 
-    # ── single ablation direction → bar chart ─────────────────────────
-    labels = [r["job"].split("__")[-1] for r in plot_rows]
+    # ── single (or zero) changing ablation axis → bar chart ────────────
+    if len(changing_cols) == 1:
+        col = changing_cols[0]
+        labels = [r[col] for r in plot_rows]
+    else:
+        labels = [r["job"].split("__")[-1] for r in plot_rows]
     values = [float(r[metric]) for r in plot_rows]
 
     pairs  = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
@@ -1704,7 +1747,10 @@ def _run_bench_viz(args) -> None:
     colors  = ["steelblue"] * (len(labels) - 1) + ["darkorange"]
     bars    = ax.bar(labels, values, color=colors)
     ax.bar_label(bars, fmt="%.4f", padding=3, fontsize=7)
-    ax.set_title(f"{bench_stem}  —  {metric}", fontsize=10)
+    bar_title = f"{bench_stem}  —  {metric}"
+    if fixed_desc:
+        bar_title += f"\n(fixed: {fixed_desc})"
+    ax.set_title(bar_title, fontsize=10)
     ax.set_ylabel(metric)
     ax.set_xlabel("category")
     plt.xticks(rotation=45, ha="right", fontsize=8)
