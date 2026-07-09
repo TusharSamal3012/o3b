@@ -34,7 +34,7 @@ modalities:
 
 # viewpoints (frames) sampled per object instance when forming cross-instance
 # pairs (1 = a single representative frame per instance, -1 = all available frames)
-frame_pair_views_per_instance: 5 # per instance pair
+frame_pair_views_per_instance: 50 # per instance pair
 
 filter_count_max: 1000 # per category if categories is applied
 

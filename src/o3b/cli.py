@@ -1471,6 +1471,11 @@ def _build_bench_parser(sub):
 
     p_viz = bench_sub.add_parser("viz", help="Interactively plot eval metrics from a bench CSV")
     _add_fetch_args(p_viz)
+    p_viz.add_argument(
+        "--qualit", action="store_true",
+        help="Instead of plotting metrics, look up qualitative images logged to W&B for each "
+             "run in the ablation table and lay them out in a grid.",
+    )
 
 
 def _run_bench_fetch(args) -> None:
@@ -1568,8 +1573,312 @@ def _run_bench_fetch(args) -> None:
     print(f"\nSaved {len(rows)} row(s) → {output}")
 
 
+def _run_bench_viz_qualit(args) -> None:
+    """Load the bench table, look up qualitative images logged to W&B, and grid them.
+
+    Reuses the ablation table built by `o3b bench fetch` (fetching it first if missing)
+    instead of re-querying W&B per ablation combo. Only the *first* table entry's run is
+    queried to discover which ``qualit/*`` image keys are available; the user picks one or
+    more of those keys, and only then are the other runs looked up (one exact `display_name`
+    lookup each, cached) to download the first image logged under each selected key. Results
+    are tiled: a 2-D grid if two ablation axes vary, a 1-D row if one varies, otherwise a
+    near-square grid over all runs.
+    """
+    import csv
+    import math
+    import tempfile
+    from collections import defaultdict
+
+    import matplotlib.image as mpimg
+    import matplotlib.pyplot as plt
+    import yaml
+
+    bench_stem = args.benchmark.stem
+    _ablation_base = Path.cwd() / "src" / "configs" / "ablation"
+
+    def _abl_col(a: Path) -> str:
+        try:
+            return str(a.relative_to(_ablation_base))
+        except ValueError:
+            return a.name
+
+    abl_cols = [_abl_col(a) for a in args.ablation] if args.ablation else []
+    if abl_cols:
+        table_stem = f"{bench_stem}__{'__'.join(c.replace('/', '_') for c in abl_cols)}"
+    else:
+        table_stem = bench_stem
+    csv_path = args.output or Path("tables") / f"{table_stem}.csv"
+
+    if not csv_path.exists():
+        print(f"CSV not found at {csv_path} — fetching from wandb first …")
+        _run_bench_fetch(args)
+    if not csv_path.exists():
+        print("ERROR: could not obtain CSV.")
+        return
+
+    with open(csv_path, newline="") as f:
+        all_rows = list(csv.DictReader(f))
+
+    # one entry per job: prefer the latest finished run, else just the latest row
+    by_job: dict[str, list] = defaultdict(list)
+    for row in all_rows:
+        by_job[row["job"]].append(row)
+    entries = []
+    for job in sorted(by_job):
+        candidates = [r for r in by_job[job] if r.get("state") == "finished"] or by_job[job]
+        entries.append(max(candidates, key=lambda r: r["wandb_run"]))
+
+    if not entries:
+        print(f"No rows found in {csv_path}.")
+        return
+
+    with open(args.benchmark) as f:
+        raw = yaml.safe_load(f) or {}
+    wandb_cfg = raw.get("wandb") or {}
+    wb_project = wandb_cfg.get("project", bench_stem)
+    wb_entity   = args.entity or wandb_cfg.get("entity", None)
+    project_path = f"{wb_entity}/{wb_project}" if wb_entity else wb_project
+
+    try:
+        import wandb as _wb_mod
+        api = _wb_mod.Api()
+    except ImportError:
+        print("ERROR: wandb is not installed. Run: pip install wandb")
+        return
+
+    run_by_job: dict[str, object] = {}
+
+    def _get_run(entry):
+        """Look up (and cache) the actual W&B Run object for a table entry, by exact name."""
+        job = entry["job"]
+        if job in run_by_job:
+            return run_by_job[job]
+        try:
+            matched = list(api.runs(project_path, filters={"display_name": entry["wandb_run"]}))
+        except Exception as exc:
+            print(f"  ERROR fetching run {entry['wandb_run']!r}: {exc}")
+            matched = []
+        run = matched[0] if matched else None
+        if run is None:
+            print(f"  WARNING: could not find run {entry['wandb_run']!r} in {project_path!r}")
+        run_by_job[job] = run
+        return run
+
+    def _get_type(v):
+        # summary values that are dicts come back wrapped in a `SummarySubDict`
+        # (not a plain dict), so duck-type via `.get()` instead of `isinstance(v, dict)`.
+        try:
+            return v.get("_type")
+        except AttributeError:
+            return None
+
+    # ── discover which qualit/* image keys are logged — only the first table entry ──
+    first_run = _get_run(entries[0])
+    if first_run is None:
+        return
+    image_keys = sorted(
+        k for k, v in first_run.summary.items()
+        if k.startswith("qualit/") and _get_type(v) in ("images/separated", "image-file")
+    )
+    if not image_keys:
+        print(f"No qualit/* images found in run {first_run.name!r}'s summary.")
+        return
+
+    print("\nAvailable images:")
+    for i, k in enumerate(image_keys, 1):
+        print(f"  [{i}] {k}")
+    while True:
+        raw_sel = input(f"\nSelect image(s) [1-{len(image_keys)}] (comma-separated for multiple): ").strip()
+        idxs = []
+        ok = bool(raw_sel)
+        for part in raw_sel.split(","):
+            part = part.strip()
+            if part.isdigit() and 1 <= int(part) <= len(image_keys):
+                idxs.append(int(part) - 1)
+            else:
+                ok = False
+                break
+        if ok:
+            selected_keys = [image_keys[i] for i in idxs]
+            break
+        print(f"  Enter number(s) between 1 and {len(image_keys)}, comma-separated.")
+
+    while True:
+        raw_n = input("\nHow many images per key? [1]: ").strip()
+        if raw_n == "":
+            n_images = 1
+            break
+        if raw_n.isdigit() and int(raw_n) >= 1:
+            n_images = int(raw_n)
+            break
+        print("  Enter a positive integer.")
+
+    # ── determine which ablation axes actually vary (same rule as the metric viz) ──
+    changing_cols = [
+        c for c in abl_cols
+        if len({e[c] for e in entries if c in e}) > 1
+    ]
+    fixed_cols = [c for c in abl_cols if c not in changing_cols]
+    fixed_desc = ", ".join(
+        f"{c}={next(e[c] for e in entries if c in e)}" for c in fixed_cols
+    )
+
+    cache_dir = Path(tempfile.gettempdir()) / "o3b_bench_qualit_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    history_cache: dict[tuple, list] = {}
+
+    def _all_filenames(run, key: str) -> list:
+        """All filenames logged under `key` across the run's full history, in log order.
+
+        `run.summary` only holds the *last* value logged for a key, but each eval batch
+        that had qualit enabled logs its own images at its own step — e.g. 5 batches of 4
+        samples each show up as 5 separate history rows, 20 images total, not just the last
+        batch's 4. We don't sort these: history rows already come back oldest-step-first, and
+        each row's own filename list is in original upload order (sample order), so
+        concatenating as-is preserves the real ordering.
+        """
+        cache_key = (run.id, key)
+        if cache_key in history_cache:
+            return history_cache[cache_key]
+        filenames: list = []
+        try:
+            for row in run.scan_history(keys=[key]):
+                v = row.get(key)
+                v_type = _get_type(v)
+                if v_type == "images/separated":
+                    filenames.extend(v.get("filenames") or [])
+                elif v_type == "image-file":
+                    fname = v.get("path")
+                    if fname:
+                        filenames.append(fname)
+        except Exception as exc:
+            print(f"  WARNING: could not read history for {key!r} on run {run.name}: {exc}")
+        history_cache[cache_key] = filenames
+        return filenames
+
+    def _download_image(run, key: str, idx: int):
+        """Download & return a local path to the `idx`-th image logged under `key`, or None."""
+        if run is None:
+            return None
+        filenames = _all_filenames(run, key)
+        fname = filenames[idx] if idx < len(filenames) else None
+        if not fname:
+            return None
+        run_cache = cache_dir / run.id
+        local_path = run_cache / fname
+        if not local_path.exists():
+            try:
+                run.file(fname).download(root=str(run_cache), replace=False, exist_ok=True)
+            except Exception as exc:
+                print(f"  WARNING: could not download {fname!r} for run {run.name}: {exc}")
+                return None
+        return local_path if local_path.exists() else None
+
+    total_pulls = len(selected_keys) * len(entries) * n_images
+    progress = {"i": 0}
+
+    def _show_axis(ax, entry, key, img_id):
+        if entry is not None:
+            progress["i"] += 1
+            print(f"  [{progress['i']}/{total_pulls}] {entry['job']}" + " " * 10, end="\r", flush=True)
+        run = _get_run(entry) if entry else None
+        img_path = _download_image(run, key, img_id) if run is not None else None
+        if img_path is not None:
+            ax.imshow(mpimg.imread(img_path))
+        else:
+            ax.text(0.5, 0.5, "N/A", ha="center", va="center")
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for key in selected_keys:
+        print(f"\nFetching images for {key!r} ({len(entries)} runs × {n_images} image(s) each) …")
+
+        # ── base column/row layout, before replicating per image id ────
+        # ── two changing ablation axes → 2-D grid ───────────────────────
+        if len(changing_cols) == 2:
+            col_a, col_b = changing_cols
+            vals_a = sorted({e[col_a] for e in entries if col_a in e})
+            vals_b = sorted({e[col_b] for e in entries if col_b in e})
+            by_ab = {(e[col_a], e[col_b]): e for e in entries if col_a in e and col_b in e}
+            nrows_base, ncols_base = len(vals_a), len(vals_b)
+            row_titles, col_titles = vals_a, vals_b
+            xlabel, ylabel = col_b, col_a
+
+            def _cell(r, c):
+                return by_ab.get((vals_a[r], vals_b[c])), False
+
+        # ── one changing ablation axis → 1-D row (per image id) ─────────
+        elif len(changing_cols) == 1:
+            col = changing_cols[0]
+            vals = sorted({e[col] for e in entries if col in e})
+            by_v = {e[col]: e for e in entries if col in e}
+            nrows_base, ncols_base = 1, len(vals)
+            row_titles, col_titles = None, vals
+            xlabel = ylabel = None
+
+            def _cell(r, c):
+                return by_v.get(vals[c]), False
+
+        # ── zero or >2 changing axes → near-square grid over all runs ───
+        else:
+            n = len(entries)
+            ncols_base = math.ceil(math.sqrt(n))
+            nrows_base = math.ceil(n / ncols_base)
+            row_titles, col_titles = None, None
+            xlabel = ylabel = None
+
+            def _cell(r, c, _n=n, _ncols=ncols_base):
+                idx = r * _ncols + c
+                if idx >= _n:
+                    return None, True
+                e = entries[idx]
+                return e, False
+
+        total_nrows = nrows_base * n_images
+        fig, axes = plt.subplots(
+            total_nrows, ncols_base,
+            figsize=(max(4, ncols_base * 3), max(4, total_nrows * 3)),
+            squeeze=False,
+        )
+        for img_id in range(n_images):
+            for r in range(nrows_base):
+                for c in range(ncols_base):
+                    ax = axes[img_id * nrows_base + r][c]
+                    entry, is_pad = _cell(r, c)
+                    if is_pad:
+                        ax.axis("off")
+                        continue
+                    _show_axis(ax, entry, key, img_id)
+                    if img_id == 0 and r == 0 and col_titles is not None:
+                        ax.set_title(col_titles[c], fontsize=9)
+                    if c == 0:
+                        label_parts = []
+                        if n_images > 1:
+                            label_parts.append(f"img {img_id}")
+                        if row_titles is not None:
+                            label_parts.append(str(row_titles[r]))
+                        if label_parts:
+                            ax.set_ylabel("\n".join(label_parts), fontsize=8)
+
+        fig.suptitle(f"{bench_stem}  —  {key}" + (f"\n(fixed: {fixed_desc})" if fixed_desc else ""))
+        if xlabel:
+            fig.text(0.5, 0.01, xlabel, ha="center", fontsize=9)
+        if ylabel:
+            fig.text(0.01, 0.5, ylabel, va="center", rotation="vertical", fontsize=9)
+        plt.tight_layout()
+
+        print()  # move past the progress line
+
+    plt.show()
+
+
 def _run_bench_viz(args) -> None:
     """Load (or fetch) the bench CSV and show an interactive bar-plot for a chosen metric."""
+    if getattr(args, "qualit", False):
+        _run_bench_viz_qualit(args)
+        return
+
     import csv
     from collections import defaultdict
 
