@@ -13,7 +13,7 @@ defaults:
 
 # Single category to filter for; referenced below via ${category} so the
 # category name is also reflected in the sharded dataset directory.
-category: toy_boat
+category: facial_cream
 
 categories:
   - ${category}

@@ -46,7 +46,13 @@ frame_pair_view_mode: aligned
 #category: "hair_dryer"
 #sharded_name: hc3d_frame_object_pair_${category}
 #sharded_override: true
-#sharded_shard_size: 1000  # items per Arrow shard; lower = less peak memory during build
+# items per Arrow shard; lower = less peak memory during build AND avoids the
+# pyarrow int32 offset-overflow ("offset overflow while concatenating arrays")
+# that hits binary/list columns once they exceed ~2GiB per write batch. Each
+# pair item here embeds rgb+depth+depth_mask+fo_mask for BOTH src and trgt
+# frames, so the default of 1000 is too large once depth is included — keep
+# this well below 2GiB / (2 frames * bytes-per-frame).
+sharded_shard_size: 200
 
 #categories:
 #  - toy_motorcycle
