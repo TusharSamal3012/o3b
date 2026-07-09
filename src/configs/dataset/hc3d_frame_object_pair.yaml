@@ -52,7 +52,7 @@ frame_pair_view_mode: aligned
 # pair item here embeds rgb+depth+depth_mask+fo_mask for BOTH src and trgt
 # frames, so the default of 1000 is too large once depth is included — keep
 # this well below 2GiB / (2 frames * bytes-per-frame).
-sharded_shard_size: 200
+sharded_shard_size: 50
 
 #categories:
 #  - toy_motorcycle
