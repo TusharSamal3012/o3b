@@ -51,7 +51,7 @@ class GenPose2(OD3D_Model):
         img_size: int = 224,
         n_pts: int = 1024,
         depth_max: float = 4.0,
-        depth_normalize: bool = True,
+        depth_normalize: bool = False,
         tracking: bool = False,
         tracking_T0: float = 0.55,
         ckpt_url: Optional[str] = _DEFAULT_CKPT_URL,

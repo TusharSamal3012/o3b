@@ -416,6 +416,13 @@ def _build_frame_sidebar_imgs(fo) -> "dict":
         imgs["mask"] = (
             np.stack([m.float().cpu().numpy()] * 3, axis=-1) * 255
         ).astype(np.uint8)
+    if fo.depth_mask is not None:
+        dm = fo.depth_mask
+        if dm.dim() == 3:
+            dm = dm[0]
+        imgs["depth_mask"] = (
+            np.stack([dm.float().cpu().numpy()] * 3, axis=-1) * 255
+        ).astype(np.uint8)
     _tform_for_kpts = fo.cam_tform4x4_obj_ncds if fo.cam_tform4x4_obj_ncds is not None \
         else fo.cam_tform4x4_obj
     if (

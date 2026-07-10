@@ -92,6 +92,18 @@ class OD3D_Model(nn.Module):
         return cls.create_from_config(OmegaConf.create(cfg))
 
     @classmethod
+    def create_from_config_or_name(cls, config: dict) -> "OD3D_Model":
+        """Like ``create_from_config``, but if ``config`` has no ``class_name``
+        and instead has ``model_name``, load ``configs/model/<model_name>.yaml``
+        via ``create_by_name`` and apply the remaining keys as overrides.
+        """
+        config = dict(config)
+        model_name = config.pop("model_name", None)
+        if model_name is not None:
+            return cls.create_by_name(model_name, config=config)
+        return cls.create_from_config(OmegaConf.create(config))
+
+    @classmethod
     def create_from_config(cls, config: DictConfig) -> "OD3D_Model":
         name = config.class_name
         _ensure_model_imported(name)

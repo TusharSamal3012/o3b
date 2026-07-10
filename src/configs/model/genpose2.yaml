@@ -28,3 +28,19 @@ tracking_T0: 0.55
 # this zip URL and extracted there. NOTE: this is a *signed* Dropbox URL that
 # will eventually expire — replace it with a fresh one if the download fails.
 ckpt_url: "https://ucfad7d821ef9bcc92e64f8f3c85.dl.dropboxusercontent.com/zip_download_get/Cmj0-h7_g5zBWMvGABE35k_Z3GzigWOkPelvtAAPMTtQ15S8X7AJ5W4E0Mbd7AreaQN5_YlDTVL1nHBzdlVOOdIaf8igTSmA1ZXoT9lxkBbJ-w?_download_id=727486970084019193448685378584681882790785785253308828416779983372&_log_download_success=1&_notify_domain=www.dropbox.com&dl=1"
+
+#genpose2_fpath: checkpoints/genpose2   # dir with ScoreNet/EnergyNet/ScaleNet
+#depth_normalize: false
+
+# re-express GenPose2's predicted pose in the dataset's cam_tform4x4_obj
+# convention: cam_tform4x4_cam_raw @ pred @ inv(obj_gl_tform4x4_obj_gp2)
+cam_tform4x4_cam_raw:
+  - [ 1.0,  0.0,  0.0,  0.0]
+  - [ 0.0, -1.0,  0.0,  0.0]
+  - [ 0.0,  0.0, -1.0,  0.0]
+  - [ 0.0,  0.0,  0.0,  1.0]
+obj_gl_tform4x4_obj_gp2:
+  - [ 0.0,  0.0,  1.0,  0.0]
+  - [ 0.0,  1.0,  0.0,  0.0]
+  - [-1.0,  0.0,  0.0,  0.0]
+  - [ 0.0,  0.0,  0.0,  1.0]
