@@ -217,19 +217,19 @@ def _build_platform_parser(sub):
         help="Platform name matching a config in configs/platform/ (default: slurm)",
     )
 
-    p_overview = plat_sub.add_parser(
-        "overview",
+    p_status = plat_sub.add_parser(
+        "status",
         help="Show job queue status on a remote platform",
     )
-    p_overview.add_argument(
+    p_status.add_argument(
         "-p", "--platform", default="slurm", metavar="PLATFORM",
         help="Platform name matching a config in configs/platform/ (default: slurm)",
     )
-    p_overview.add_argument(
+    p_status.add_argument(
         "--configs", action="store_true",
         help="Also print the resolved platform config",
     )
-    p_overview.add_argument(
+    p_status.add_argument(
         "--hours", type=float, default=2.0, metavar="N",
         help="Show sacct history for the last N hours (default: 2)",
     )
@@ -733,7 +733,7 @@ def _overview_tui(stdscr, jobs: list, ssh_host: str, title: str):
             return ("kill", jobs[current])
 
 
-def _run_platform_overview(args):
+def _run_platform_status(args):
     import curses
     import subprocess
     from omegaconf import OmegaConf
@@ -1324,8 +1324,8 @@ def _run_platform_queue(args):
 def _run_platform(args):
     if args.platform_command == "setup":
         _run_platform_setup(args)
-    elif args.platform_command == "overview":
-        _run_platform_overview(args)
+    elif args.platform_command == "status":
+        _run_platform_status(args)
     elif args.platform_command == "runi":
         _run_platform_runi(args)
     elif args.platform_command == "setupi":
