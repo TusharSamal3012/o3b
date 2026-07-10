@@ -304,7 +304,7 @@ class ConfigurableDataset(_TorchDataset):
 
         hf = build_sharded_dataset_from_generator(_gen, writer_batch_size=self.cfg.sharded_shard_size)
         pbar.close()
-        write_sharded_dataset(hf, path)
+        write_sharded_dataset(hf, path, shard_size=self.cfg.sharded_shard_size)
         self._sharded = read_sharded_dataset(path)
         print(f"Done. Wrote {len(self._sharded)} items → {path}")
 

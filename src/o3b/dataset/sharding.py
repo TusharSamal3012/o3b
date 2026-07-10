@@ -101,7 +101,7 @@ def record_to_item(record: dict, item_cls):
 
 # ── disk I/O ────────────────────────────────────────────────────────────────────
 
-_WRITE_BATCH_SIZE = 1048
+_DEFAULT_SHARD_SIZE = 1048  # fallback items-per-shard when write_sharded_dataset gets none
 
 
 def build_sharded_dataset(records: list[dict]):
@@ -146,12 +146,17 @@ def _remove_dir(path: Path) -> None:
     shutil.rmtree(str(trash), ignore_errors=True)
 
 
-def write_sharded_dataset(hf_dataset, path) -> None:
-    """Save a HuggingFace Dataset to ``path`` as Arrow shards (overwrites)."""
+def write_sharded_dataset(hf_dataset, path, shard_size: int | None = None) -> None:
+    """Save a HuggingFace Dataset to ``path`` as Arrow shards (overwrites).
+
+    ``shard_size`` is the number of items per on-disk shard file; it defaults
+    to ``_DEFAULT_SHARD_SIZE`` when not given (e.g. callers that don't tie it
+    to ``sharded_shard_size``).
+    """
     path = Path(path)
     _remove_dir(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    num_shards = max(1, int(math.ceil(len(hf_dataset) / _WRITE_BATCH_SIZE)))
+    num_shards = max(1, int(math.ceil(len(hf_dataset) / (shard_size or _DEFAULT_SHARD_SIZE))))
     hf_dataset.save_to_disk(str(path), num_shards=num_shards)
 
 
