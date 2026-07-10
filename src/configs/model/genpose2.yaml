@@ -18,7 +18,7 @@ n_pts: 1024
 # Depth handling: drop points beyond depth_max metres; normalise depth by its
 # median before inference (translation/size are rescaled back afterwards).
 depth_max: 4.0
-depth_normalize: true
+depth_normalize: false # true
 
 # Tracking (use the previous frame's pose as init); off for independent frames.
 tracking: false
