@@ -1,0 +1,6 @@
+class_name: SigLIP2
+hub_model: google/siglip2-base-patch16-384
+num_views: 100
+resolution: 512
+tolerance: 0.004
+freeze: true

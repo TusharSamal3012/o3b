@@ -2,8 +2,7 @@ import torch
 from PIL import Image
 from torchvision.utils import make_grid
 import numpy as np
-from o3b.model.diff3f.diff3f.diffusion import add_texture_to_render
-from o3b.model.diff3f.diff3f.dino import get_dino_features
+from o3b.model.diff3f.diff3f.extractors import Diff3FExtractor
 from o3b.model.diff3f.diff3f.render import batch_render
 from tqdm import tqdm
 from time import time
@@ -75,8 +74,19 @@ def get_features_per_vertex(
     return_image=True,
     bq=True,
     prompts_list=None,
+    extractor_fn=None,
 ):
     t1 = time()
+    extractor = extractor_fn or Diff3FExtractor(
+        pipe,
+        dino_model,
+        prompt,
+        use_latent=use_latent,
+        num_images_per_prompt=num_images_per_prompt,
+        return_image=return_image,
+        prompts_list=prompts_list,
+    )
+    feature_dims = getattr(extractor, "feature_dims", FEATURE_DIMS)
     if mesh_vertices is None:
         mesh_vertices = mesh.verts_list()[0]
     if len(mesh_vertices) > VERTEX_GPU_LIMIT:
@@ -99,7 +109,7 @@ def get_features_per_vertex(
     normal_map_input = None
     depth = depth.cpu()
     torch.cuda.empty_cache()
-    ft_per_vertex = torch.zeros((len(mesh_vertices), FEATURE_DIMS)).half()  # .to(device)
+    ft_per_vertex = torch.zeros((len(mesh_vertices), feature_dims)).half()  # .to(device)
     ft_per_vertex_count = torch.zeros((len(mesh_vertices), 1)).half()  # .to(device)
     for idx in tqdm(range(len(batched_renderings))):
         dp = depth[idx].flatten().unsqueeze(1)
@@ -117,35 +127,10 @@ def get_features_per_vertex(
         if use_normal_map:
             normal_map_input = normal_batched_renderings[idx]
         depth_map = depth[idx, :, :, 0].unsqueeze(0).to(device)
-        if prompts_list is not None:
-            prompt = random.choice(prompts_list)
-        diffusion_output = add_texture_to_render(
-            pipe,
-            diffusion_input_img,
-            depth_map,
-            prompt,
-            normal_map_input=normal_map_input,
-            use_latent=use_latent,
-            num_images_per_prompt=num_images_per_prompt,
-            return_image=return_image
+
+        aligned_features = extractor(
+            diffusion_input_img, depth_map, grid, device, normal_map_input=normal_map_input
         )
-        
-        # sd+controlnet doesnt work anymore due to deprecated code
-        aligned_dino_features = get_dino_features(device, dino_model, diffusion_output[1][0], grid)
-        aligned_features = None
-        with torch.no_grad():
-            ft = torch.nn.Upsample(size=(H,W), mode="bilinear")(diffusion_output[0].unsqueeze(0)).to(device)
-            ft_dim = ft.size(1)
-            aligned_features = torch.nn.functional.grid_sample(
-                ft, grid, align_corners=False
-            ).reshape(1, ft_dim, -1)
-            aligned_features = torch.nn.functional.normalize(aligned_features, dim=1)
-        # this is feature per pixel in the grid
-        aligned_features = torch.hstack([aligned_features*0.5, aligned_dino_features*0.5])
-        
-        # lets try again
-        #aligned_dino_features = get_dino_features(device, dino_model, diffusion_output[0], grid)
-        #aligned_features = aligned_dino_features
 
         features_per_pixel = aligned_features[0, :, indices].cpu()
         # map pixel to vertex on mesh

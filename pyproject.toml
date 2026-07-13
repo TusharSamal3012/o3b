@@ -29,6 +29,7 @@ dependencies = [
     "gdist",
     "qwen-vl-utils",
     "datasets",
+    "transformers>=4.49",
 ]
 
 [project.scripts]

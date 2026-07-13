@@ -42,12 +42,12 @@ def get_source_to_target_map(verts_source, verts_target, faces_source, faces_tar
             
     return source_to_target_map
 
-def compute_features(device, pipe, dino_model, m, prompt, num_views, H, W, tolerance, num_images_per_prompt, use_normal_map):
+def compute_features(device, pipe, dino_model, m, prompt, num_views, H, W, tolerance, num_images_per_prompt, use_normal_map, extractor_fn=None):
     mesh = convert_mesh_container_to_torch_mesh(m, device=device, is_tosca=False)
     mesh_vertices = mesh.verts_list()[0]
     features = get_features_per_vertex(
         device=device,
-        pipe=pipe, 
+        pipe=pipe,
         dino_model=dino_model,
         mesh=mesh,
         prompt=prompt,
@@ -58,6 +58,7 @@ def compute_features(device, pipe, dino_model, m, prompt, num_views, H, W, toler
         tolerance=tolerance,
         num_images_per_prompt=num_images_per_prompt,
         use_normal_map=use_normal_map,
+        extractor_fn=extractor_fn,
     )
     return features.cpu()
 
