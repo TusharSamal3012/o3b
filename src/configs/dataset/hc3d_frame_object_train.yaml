@@ -1,0 +1,40 @@
+# o3b dataset fetch -d hc3d_frame_object_train
+# o3b dataset index -d hc3d_frame_object_train --remove
+# o3b dataset index -d hc3d_frame_object_train --remote -p slurm_lmbl40
+# (filter_count_max stops indexing after this many filter-matching rows; also limits viz)
+
+
+# o3b dataset preprocess -d hc3d_frame_object --remote -p slurm_lmbl40
+
+# o3b dataset viz   -d hc3d_frame_object
+
+defaults:
+  - hc3d_frame_object
+  - _self_
+
+# split: "train" | "test" | "all"
+split: train
+
+# filter_is_real: null → all data  |  false → synthetic only  |  true → real only
+filter_is_real: false
+filter_has_kpts: false
+
+modalities:
+  - rgb                    # GenPose2 input
+  - depth                  # GenPose2 input
+  - depth_mask             # GenPose2 input
+  - fo_mask                # GenPose2 input (object instance mask)
+  - cam_intr4x4            # crop transform + GenPose2
+  - cam_tform4x4_obj       # GT pose
+  - cam_tform4x4_obj_ncds  # task: maps obj_kpts3d (NCDS) → camera space
+  - cam_bbox2d             # required by the CropCamBBox2D transform
+  - cam_bbox3d             # obj-space 3D box side lengths (drawn in qualit)
+  - obj_syms                # per-axis symmetry code (see CamCrsp3DNNTask keypoint symmetry eval)
+  - category
+
+filter_count_max: 50000 # per category if categories is applied
+
+# 1K -> 50K 
+# 10K -> 500K
+# 50K -> 2.5M  # actually maximum is probably around 50K per category
+# 100K -> 5M 
