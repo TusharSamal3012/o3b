@@ -1,0 +1,7 @@
+class_name: DINOv3
+hub_model: facebook/dinov3-vitb16-pretrain-lvd1689m
+image_size: 384
+num_views: 100
+resolution: 512
+tolerance: 0.004
+freeze: true

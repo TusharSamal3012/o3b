@@ -35,6 +35,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "GenPose2":        "o3b.model.obj_pose.genpose2.model",
     "ResNetHead":      "o3b.model.resnet.model",
     "SigLIP2":         "o3b.model.siglip2.model",
+    "DINOv3":          "o3b.model.dinov3.model",
 }
 
 
