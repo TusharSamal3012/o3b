@@ -1,0 +1,7 @@
+class_name: TIPSv2
+hub_model: google/tipsv2-b14
+num_views: 100
+resolution: 512
+feature_resolution: 448
+tolerance: 0.004
+freeze: true
