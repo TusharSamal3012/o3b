@@ -34,6 +34,7 @@ class Diff3FModel(OD3D_Model):
         resolution: int = 512,
         tolerance: float = 0.004,
         freeze: bool = True,
+        aggregation_mode: str = "mean",
     ):
         super().__init__()
         self.prompt = prompt
@@ -43,6 +44,7 @@ class Diff3FModel(OD3D_Model):
         self.resolution = resolution
         self.tolerance = tolerance
         self.freeze = freeze
+        self.aggregation_mode = aggregation_mode
         self.out_dim = FEATURE_DIMS
 
         # loaded on first forward call to avoid GPU allocation at construction time
@@ -61,37 +63,54 @@ class Diff3FModel(OD3D_Model):
 
     def _forward_object_batch(self, batch):
         """Extract per-vertex diff3f features for a batch sharing a single Mesh."""
-        import gc
         from o3b.model.diff3f.diff3f_utils import compute_features
         from o3b.model.diff3f.diff3f.dataloaders.mesh_container import MeshContainer
-        from o3b.model.diff3f.diff3f.diffusion import init_pipe
-        from o3b.model.diff3f.diff3f.dino import init_dino
 
         mesh = batch.mesh
         if mesh is None:
             return batch
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Reuse the cached pipeline/DINO model across calls (same as forward()'s
+        # frame-based path) instead of rebuilding the whole SD+ControlNet+DINO
+        # stack from scratch per mesh — with persistent_workers=True a single
+        # worker processes every item in the dataset, so a rebuild-and-free cycle
+        # per mesh means repeated from_pretrained()/load_file() staging through
+        # host RAM, which is both slow and a source of RAM churn across a run.
+        self._ensure_models(device)
 
-        pipe = init_pipe(device, use_normal_map=self.use_normal_map)
-        dino_model = init_dino(device)
-        
         #  [:, [0, 2, 1]]
         source_mesh = MeshContainer(vert=mesh.verts, face=mesh.faces)
         feats = compute_features(
-            device, pipe, dino_model, source_mesh,
+            device, self._pipe, self._dino, source_mesh,
             self.prompt, self.num_views, self.resolution, self.resolution,
             self.tolerance, self.num_images_per_prompt, self.use_normal_map,
-        )  # (V, FEATURE_DIMS) float cpu
+            aggregation_mode=self.aggregation_mode,
+        )  # (V, FEATURE_DIMS) float cpu, or PerVertexFeatures if aggregation_mode="all_views"
 
-        del pipe
-        del dino_model
-        torch.cuda.empty_cache()
-        gc.collect()
+        B = batch.verts3d.shape[0] if batch.verts3d is not None else 1
+
+        if self.aggregation_mode == "all_views":
+            # baseline (mean) representation stays on verts3d_feats, unchanged shape/meaning;
+            # the new all_views representation lives on parallel fields so nothing downstream
+            # that reads verts3d_feats needs to change.
+            mean_feats = feats.mean.float()
+            # Stay in half precision for all_views: it's documented as half in
+            # PerVertexFeatures, and upcasting to float32 here doubled a tensor
+            # that was already the single biggest allocation in this call (while
+            # the old half copy stayed alive through `feats` a moment longer,
+            # briefly needing both at once) — a real contributor to host-RAM
+            # OOMs on memory-constrained runtimes.
+            all_views_feats = feats.all_views
+            all_views_mask  = feats.all_views_mask
+            V, K = all_views_feats.shape[0], all_views_feats.shape[1]
+            batch.verts3d_feats = mean_feats.unsqueeze(0).expand(B, V, -1).contiguous()
+            batch.verts3d_feats_all_views = all_views_feats.unsqueeze(0).expand(B, V, K, -1).contiguous()
+            batch.verts3d_feats_all_views_mask = all_views_mask.unsqueeze(0).expand(B, V, K).contiguous()
+            return batch
 
         feats = feats.float()
         V = feats.shape[0]
-        B = batch.verts3d.shape[0] if batch.verts3d is not None else 1
         batch.verts3d_feats = feats.unsqueeze(0).expand(B, V, -1).contiguous()
         return batch
 

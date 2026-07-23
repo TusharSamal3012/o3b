@@ -102,7 +102,11 @@ def init_pipe(device, use_normal_map: bool = False):
     pipe.set_progress_bar_config(disable=True)
     pipe = pipe.to(device)
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-    pipe.enable_model_cpu_offload()
+    # Keep the whole pipeline resident on `device` (set by pipe.to(device) above)
+    # instead of enable_model_cpu_offload(), which shuttles submodules between
+    # host RAM and GPU every step. That trade only makes sense when GPU VRAM is
+    # the scarce resource; here host RAM was the one running out (SIGKILL from
+    # the OOM killer) while the GPU had headroom to spare.
     # pipe.enable_xformers_memory_efficient_attention()
     return pipe
 

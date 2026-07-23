@@ -5,7 +5,7 @@ from o3b.cv.geometry.transform import proj3d2d_tform4x4_intr4x4_broadcast
 import torch
 from torch import Tensor
 from o3b.data.datatypes.mesh import Mesh
-from o3b.data.datatypes.frame import _stack_field, _pad_stack_field
+from o3b.data.datatypes.frame import _stack_field, _pad_stack_field, _pad_stack_ragged2d_field
 
 
 def _draw_kpts2d_on_imgs(
@@ -160,6 +160,12 @@ class Object:
     verts3d:                 Optional[Tensor] = None  # (V, 3)
     verts3d_feats:           Optional[Tensor] = None  # (V, F) or (V, V, F) multi-view
     verts3d_feats_mask:      Optional[Tensor] = None  # (V,) or (V, V) bool
+    verts3d_feats_all_views:      Optional[Tensor] = None  # (V, K, F) — every raw per-view
+                                                             #  observation, parallel to
+                                                             #  verts3d_feats (mean); see
+                                                             #  get_features_per_vertex
+                                                             #  aggregation_mode="all_views".
+    verts3d_feats_all_views_mask: Optional[Tensor] = None  # (V, K) bool
     mesh:                    Optional[Mesh]   = None
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (4, 4)
     obj_size_ncds:           Optional[float]  = None  # max NCDS bounding-box extent (= 2.0 when set)
@@ -623,6 +629,8 @@ class ObjectBatch:
     verts3d:                 Optional[Tensor] = None  # (B, V, 3)
     verts3d_feats:           Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
     verts3d_feats_mask:      Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
+    verts3d_feats_all_views:      Optional[Tensor] = None  # (B, V, K, F) — see Object.verts3d_feats_all_views
+    verts3d_feats_all_views_mask: Optional[Tensor] = None  # (B, V, K) bool
     mesh:                    Optional[Mesh]   = None  # shared mesh for all B samples
     obj_ncds0c_tform4x4_obj: Optional[Tensor] = None  # (B, 4, 4)
     obj_kpts3d:              Optional[Tensor] = None  # (B, K, 3)
@@ -639,6 +647,8 @@ class ObjectPairBatch:
     src_verts3d:                  Optional[Tensor] = None  # (B, V, 3)
     src_verts3d_feats:            Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
     src_verts3d_feats_mask:       Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
+    src_verts3d_feats_all_views:      Optional[Tensor] = None  # (B, V, K, F) — see Object.verts3d_feats_all_views
+    src_verts3d_feats_all_views_mask: Optional[Tensor] = None  # (B, V, K) bool
     src_verts3d_part_id:          Optional[Tensor] = None  # (B, V)               int64, -1=unlabeled
     src_mesh:                     Optional[Mesh]   = None  # shared mesh for all B src samples
     src_obj_ncds0c_tform4x4_obj:  Optional[Tensor] = None  # (B, 4, 4)
@@ -652,6 +662,8 @@ class ObjectPairBatch:
     trgt_verts3d:                 Optional[Tensor] = None  # (B, V, 3)
     trgt_verts3d_feats:           Optional[Tensor] = None  # (B, V, F) or (B, V, V, F)
     trgt_verts3d_feats_mask:      Optional[Tensor] = None  # (B, V) or (B, V, V)  bool
+    trgt_verts3d_feats_all_views:      Optional[Tensor] = None  # (B, V, K, F) — see Object.verts3d_feats_all_views
+    trgt_verts3d_feats_all_views_mask: Optional[Tensor] = None  # (B, V, K) bool
     trgt_verts3d_part_id:         Optional[Tensor] = None  # (B, V)               int64, -1=unlabeled
     trgt_mesh:                    Optional[Mesh]   = None  # shared mesh for all B trgt samples
     src_meshes:                   Optional[list]   = None  # list of B Mesh objects (per-sample)
@@ -680,6 +692,14 @@ def collate_object_pairs(
             return None, None
         return _pad_stack_field(vals)
 
+    def _get_pad_ragged(attr, mask_attr, side: str):
+        """Pad-stack (V, K, F) all_views tensors, folding each sample's own mask in."""
+        vals  = [getattr(getattr(s, f"{side}_object"), attr) for s in samples]
+        masks = [getattr(getattr(s, f"{side}_object"), mask_attr) for s in samples]
+        if include and f"{side}_{attr}" not in include:
+            return None, None
+        return _pad_stack_ragged2d_field(vals, masks)
+
     def _merge_masks(pad_mask, raw_mask):
         if pad_mask is None and raw_mask is None:
             return None
@@ -701,10 +721,16 @@ def collate_object_pairs(
     src_verts3d,       src_feats_pad_mask   = _get_pad("verts3d",            "src")
     src_verts3d_feats, _src_feats_pad_mask  = _get_pad("verts3d_feats",       "src")
     src_feats_mask_raw, _                   = _get_pad("verts3d_feats_mask",  "src")
+    src_verts3d_feats_all_views, src_verts3d_feats_all_views_mask = _get_pad_ragged(
+        "verts3d_feats_all_views", "verts3d_feats_all_views_mask", "src"
+    )
 
     trgt_verts3d,       trgt_feats_pad_mask  = _get_pad("verts3d",            "trgt")
     trgt_verts3d_feats, _trgt_feats_pad_mask = _get_pad("verts3d_feats",       "trgt")
     trgt_feats_mask_raw, _                   = _get_pad("verts3d_feats_mask",  "trgt")
+    trgt_verts3d_feats_all_views, trgt_verts3d_feats_all_views_mask = _get_pad_ragged(
+        "verts3d_feats_all_views", "verts3d_feats_all_views_mask", "trgt"
+    )
 
     _src_meshes  = [s.src_object.mesh  for s in samples]
     _trgt_meshes = [s.trgt_object.mesh for s in samples]
@@ -739,6 +765,8 @@ def collate_object_pairs(
         src_verts3d                 = src_verts3d,
         src_verts3d_feats           = src_verts3d_feats,
         src_verts3d_feats_mask      = _merge_masks(_src_feats_pad_mask, src_feats_mask_raw),
+        src_verts3d_feats_all_views      = src_verts3d_feats_all_views,
+        src_verts3d_feats_all_views_mask = src_verts3d_feats_all_views_mask,
         src_verts3d_part_id         = src_verts3d_part_id,
         src_meshes                  = src_meshes_list,
         src_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","src"),
@@ -752,6 +780,8 @@ def collate_object_pairs(
         trgt_verts3d                 = trgt_verts3d,
         trgt_verts3d_feats           = trgt_verts3d_feats,
         trgt_verts3d_feats_mask      = _merge_masks(_trgt_feats_pad_mask, trgt_feats_mask_raw),
+        trgt_verts3d_feats_all_views      = trgt_verts3d_feats_all_views,
+        trgt_verts3d_feats_all_views_mask = trgt_verts3d_feats_all_views_mask,
         trgt_verts3d_part_id         = trgt_verts3d_part_id,
         trgt_meshes                  = trgt_meshes_list,
         trgt_obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj","trgt"),
@@ -791,6 +821,17 @@ def collate_objects(
     verts3d_feats, _feats_pad_mask  = _get_pad("verts3d_feats")
     feats_mask_raw, _               = _get_pad("verts3d_feats_mask")
 
+    def _get_pad_ragged(attr, mask_attr):
+        vals  = [getattr(s, attr) for s in samples]
+        masks = [getattr(s, mask_attr) for s in samples]
+        if include and attr not in include:
+            return None, None
+        return _pad_stack_ragged2d_field(vals, masks)
+
+    verts3d_feats_all_views, verts3d_feats_all_views_mask = _get_pad_ragged(
+        "verts3d_feats_all_views", "verts3d_feats_all_views_mask"
+    )
+
     return ObjectBatch(
         pts3d                   = _get("pts3d"),
         pts3d_feats             = _get("pts3d_feats"),
@@ -798,6 +839,8 @@ def collate_objects(
         verts3d                 = verts3d,
         verts3d_feats           = verts3d_feats,
         verts3d_feats_mask      = _merge_masks(_feats_pad_mask, feats_mask_raw),
+        verts3d_feats_all_views      = verts3d_feats_all_views,
+        verts3d_feats_all_views_mask = verts3d_feats_all_views_mask,
         obj_ncds0c_tform4x4_obj = _get("obj_ncds0c_tform4x4_obj"),
         obj_kpts3d              = _get("obj_kpts3d"),
         obj_kpts3d_mask         = _get("obj_kpts3d_mask"),

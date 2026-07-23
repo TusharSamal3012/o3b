@@ -248,25 +248,38 @@ class HouseCorr3D(ConfigurableDataset):
         need_mesh        = _want("mesh",                    mods)
         need_verts3d     = _want("verts3d",                 mods)
         need_verts3d_feats = _want("verts3d_feats",         mods)
+        need_verts3d_feats_all_views = _want("verts3d_feats_all_views", mods)
         need_tform       = _want("obj_ncds0c_tform4x4_obj", mods)
         need_kpts        = _want("obj_kpts3d",              mods)
         need_category    = _want("category",                mods)
         need_syms        = _want("obj_syms",                mods)
 
         mesh, tform = None, None
-        if need_mesh or need_verts3d or need_verts3d_feats or need_tform or need_kpts:
+        if need_mesh or need_verts3d or need_verts3d_feats or need_verts3d_feats_all_views or need_tform or need_kpts:
             mesh_rel = row.get("mesh_path")
             mesh_entry = self.path_raw / mesh_rel if mesh_rel else self.path_object_meshes / oid
             from o3b.io import _load_mesh
             mesh, tform = _load_mesh(mesh_entry)
 
-            if (need_mesh or need_verts3d or need_verts3d_feats) and \
+            if (need_mesh or need_verts3d or need_verts3d_feats or need_verts3d_feats_all_views) and \
                     self.cfg.mesh_type != "default" and mesh is not None:
                 from o3b.data.datatypes.mesh import Mesh
                 converted_path = (
                     self.path_preprocess / "mesh" / self.cfg.mesh_type / f"{oid}.glb"
                 )
-                mesh = Mesh.load_or_convert(converted_path, mesh_entry, self.cfg.mesh_type)
+                # "mean" unless the config explicitly asks for all_views features
+                # (see get_features_per_vertex aggregation_mode); additive/opt-in —
+                # existing configs are untouched since this defaults to "mean".
+                # DatasetConfig is a plain dataclass (no .get()) and doesn't declare
+                # this as a first-class field, so it's read from the same `extra`
+                # pass-through dict other per-dataset kwargs use (e.g. `image_size`
+                # in hc3d.yaml/dm.yaml) — set it under dataset.extra in yaml, not
+                # as a bare top-level dataset key.
+                feats_aggregation_mode = (self.cfg.extra or {}).get("feats_aggregation_mode", "mean")
+                mesh = Mesh.load_or_convert(
+                    converted_path, mesh_entry, self.cfg.mesh_type,
+                    aggregation_mode=feats_aggregation_mode,
+                )
 
         kpts3d, kpts3d_mask = None, None
         if need_kpts:
@@ -296,6 +309,10 @@ class HouseCorr3D(ConfigurableDataset):
             mesh                    = mesh if need_mesh else None,
             verts3d                 = mesh.verts if (need_verts3d and mesh is not None) else None,
             verts3d_feats           = mesh.vert_feats if (need_verts3d_feats and mesh is not None) else None,
+            verts3d_feats_all_views      = mesh.vert_feats_all_views
+                                            if (need_verts3d_feats_all_views and mesh is not None) else None,
+            verts3d_feats_all_views_mask = mesh.vert_feats_all_views_mask
+                                            if (need_verts3d_feats_all_views and mesh is not None) else None,
             obj_ncds0c_tform4x4_obj = tform if (need_tform or need_mesh) else None,
             obj_size_ncds           = obj_size_ncds,
             obj_size                = obj_size,

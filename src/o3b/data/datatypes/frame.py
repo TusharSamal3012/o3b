@@ -31,6 +31,34 @@ def _pad_stack_field(values: list):
     return out, mask
 
 
+def _pad_stack_ragged2d_field(values: list, masks: "Optional[list]" = None):
+    """Pad variable-size (dim0, dim1, ...) tensors into (B, D0_max, D1_max, ...).
+
+    Used for per-vertex "all_views" features (V, K, F): both the vertex count V
+    and the per-mesh observation count K vary across a batch. Returns
+    (padded_values, valid_mask), each None if any input value is None.
+
+    masks: matching list of (D0_i, D1_i) bool tensors (True = real, not padding),
+    e.g. each sample's own all_views_mask. Folded directly into the returned mask
+    so callers don't need a separate pad-mask/raw-mask merge step. None entries
+    default to all-True (the whole sample is real).
+    """
+    if any(v is None for v in values):
+        return None, None
+    D0_max = max(v.shape[0] for v in values)
+    D1_max = max(v.shape[1] for v in values)
+    B = len(values)
+    trailing = values[0].shape[2:]
+    out  = torch.zeros((B, D0_max, D1_max) + trailing, dtype=values[0].dtype)
+    mask = torch.zeros((B, D0_max, D1_max), dtype=torch.bool)
+    for i, v in enumerate(values):
+        d0, d1 = v.shape[0], v.shape[1]
+        out[i, :d0, :d1] = v
+        m = masks[i] if masks is not None and masks[i] is not None else torch.ones(d0, d1, dtype=torch.bool)
+        mask[i, :d0, :d1] = m
+    return out, mask
+
+
 def _pca_to_rgb(featmap: Tensor) -> Tensor:
     """Project (H, W, F) feature map to (H, W, 3) via PCA, output in [0, 1]."""
     H, W, F = featmap.shape

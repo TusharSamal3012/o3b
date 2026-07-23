@@ -7,6 +7,25 @@ import numpy as np
 from torch import Tensor
 import torch
 
+# Feature-extraction models (diff3f's SD+ControlNet+DINO stack in particular) are
+# expensive to construct — reused across every mesh a DataLoader worker converts
+# in one run instead of being rebuilt (and relying on gc to free it) per mesh.
+# Keyed by (feature_model_name, sorted model_config items) so different configs
+# (e.g. aggregation_mode) don't collide; persists for the worker process's
+# lifetime (matches persistent_workers=True in o3b/run.py).
+_FEATURE_MODEL_CACHE: dict = {}
+
+
+def _get_cached_feature_model(feature_model_name: str, model_config: Optional[dict] = None):
+    key = (feature_model_name, tuple(sorted((model_config or {}).items())))
+    model = _FEATURE_MODEL_CACHE.get(key)
+    if model is None:
+        from o3b.model.model import OD3D_Model
+        model = OD3D_Model.create_by_name(feature_model_name, config=model_config)
+        model.eval()
+        _FEATURE_MODEL_CACHE[key] = model
+    return model
+
 
 def weld_mesh(
     verts: np.ndarray, faces: np.ndarray
@@ -48,9 +67,15 @@ class Mesh:
     faces_uvs:   Optional[Tensor] = None  # (F, 3) int64 UV face indices
     texture:     Optional[Tensor] = None  # (3, H, W) float
     vert_feats:  Optional[Tensor] = None  # (V, C) float — per-vertex feature vectors
+    vert_feats_all_views:      Optional[Tensor] = None  # (V, K, C) float — every raw
+                                                          #  per-view observation, parallel
+                                                          #  to vert_feats (mean); see
+                                                          #  get_features_per_vertex
+                                                          #  aggregation_mode="all_views".
+    vert_feats_all_views_mask: Optional[Tensor] = None  # (V, K) bool
 
     def save(self, path: Path) -> None:
-        """Export this mesh to a GLB file, and vert_feats to a sibling .pt file."""
+        """Export this mesh to a GLB file, and vert_feats(_all_views) to sibling .pt files."""
         from o3b.io import _mesh_to_trimesh
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,10 +83,16 @@ class Mesh:
         if self.vert_feats is not None:
             feats_path = path.parent / (path.stem + "_vert_feats.pt")
             torch.save(self.vert_feats, feats_path)
+        if self.vert_feats_all_views is not None:
+            av_path = path.parent / (path.stem + "_vert_feats_all_views.pt")
+            torch.save(self.vert_feats_all_views, av_path)
+        if self.vert_feats_all_views_mask is not None:
+            av_mask_path = path.parent / (path.stem + "_vert_feats_all_views_mask.pt")
+            torch.save(self.vert_feats_all_views_mask, av_mask_path)
 
     @classmethod
     def load(cls, path: Path) -> "Mesh":
-        """Load a mesh from any supported file format, plus vert_feats if present."""
+        """Load a mesh from any supported file format, plus vert_feats(_all_views) if present."""
         from o3b.io import _load_mesh
         mesh, _ = _load_mesh(Path(path))
         if mesh is None:
@@ -69,6 +100,12 @@ class Mesh:
         feats_path = Path(path).parent / (Path(path).stem + "_vert_feats.pt")
         if feats_path.exists():
             mesh.vert_feats = torch.load(feats_path, weights_only=True)
+        av_path = Path(path).parent / (Path(path).stem + "_vert_feats_all_views.pt")
+        if av_path.exists():
+            mesh.vert_feats_all_views = torch.load(av_path, weights_only=True)
+        av_mask_path = Path(path).parent / (Path(path).stem + "_vert_feats_all_views_mask.pt")
+        if av_mask_path.exists():
+            mesh.vert_feats_all_views_mask = torch.load(av_mask_path, weights_only=True)
         return mesh
 
     def to_pytorch3d(self, device=None):
@@ -114,18 +151,27 @@ class Mesh:
         converted_path: Path,
         default_path: Path,
         mesh_type: str,
+        aggregation_mode: str = "mean",
     ) -> "Mesh":
         """Return the converted mesh, generating and caching it on first call.
 
         If *converted_path* exists it is loaded directly.  Otherwise the mesh
         at *default_path* is loaded, converted to *mesh_type* (e.g. ``"mc64"``),
         saved to *converted_path*, and returned.
+
+        aggregation_mode="all_views" additionally requires vert_feats_all_views.
+        A cache entry written under aggregation_mode="mean" (or from before this
+        mode existed) won't have that sidecar — in that case the cache hit is
+        treated as a miss for this aspect and the mesh is regenerated (and the
+        cache overwritten) instead of silently returning all_views=None.
         """
         converted_path = Path(converted_path)
         if converted_path.exists():
-            return cls.load(converted_path)
+            cached = cls.load(converted_path)
+            if aggregation_mode != "all_views" or cached.vert_feats_all_views is not None:
+                return cached
         mesh = cls.load(default_path)
-        converted = convert_mesh(mesh_type, mesh)
+        converted = convert_mesh(mesh_type, mesh, aggregation_mode=aggregation_mode)
         converted.save(converted_path)
         return converted
 
@@ -151,19 +197,22 @@ def _parse_mc_type(type_str: str) -> dict:
     }
 
 
-def convert_mesh(type_str: str, mesh: Mesh) -> Mesh:
+def convert_mesh(type_str: str, mesh: Mesh, aggregation_mode: str = "mean") -> Mesh:
     if not type_str.startswith("mc"):
         raise ValueError(f"Unknown mesh type: {type_str}")
     params = _parse_mc_type(type_str)
     mc_mesh = convert_mesh_to_mc(mesh, params["res"])
     if params["feature_model"] is not None:
-        vert_feats = _extract_vert_feats(
+        vert_feats, vert_feats_all_views, vert_feats_all_views_mask = _extract_vert_feats(
             mc_mesh,
             n_views=params["n_views"] or 4,
             resolution=params["resolution"] or 256,
             feature_model_name=params["feature_model"],
+            aggregation_mode=aggregation_mode,
         )
         mc_mesh.vert_feats = vert_feats
+        mc_mesh.vert_feats_all_views = vert_feats_all_views
+        mc_mesh.vert_feats_all_views_mask = vert_feats_all_views_mask
     return mc_mesh
 
 
@@ -172,9 +221,13 @@ def _extract_vert_feats(
     n_views: int,
     resolution: int,
     feature_model_name: str,
-) -> Tensor:
+    aggregation_mode: str = "mean",
+) -> "Tuple[Tensor, Optional[Tensor], Optional[Tensor]]":
     """Render mesh from n_views uniform viewpoints, extract features with the named model,
     project mesh vertices onto each feature map, and return per-vertex mean features (V, C).
+
+    Returns (vert_feats, vert_feats_all_views, vert_feats_all_views_mask); the latter two
+    are None unless aggregation_mode="all_views" (see Mesh.vert_feats_all_views).
     """
     import torch
     import torch.nn.functional as F
@@ -182,17 +235,37 @@ def _extract_vert_feats(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(feature_model_name)
-    
+
     # ── Models that do their own rendering (diff3f, densematcher/dm) ────────────
     _SELF_RENDERING = {"diff3f", "dm", "dmmv", "dmweld", "dmweldflip", "siglip2", "dinov3b"}
     if feature_model_name.lower() in _SELF_RENDERING:
-        from o3b.model.model import OD3D_Model
         from o3b.data.datatypes.object import ObjectBatch
-        model = OD3D_Model.create_by_name(feature_model_name)
-        model.eval()
+        # num_views/resolution as parsed from the mesh_type string (e.g. "vuni4_r256")
+        # must reach the model's constructor — OD3D_Model.create_from_config only wires
+        # in kwargs the target model class's __init__ actually declares, so it's safe to
+        # pass both unconditionally here even for self-rendering models (densematcher's
+        # variants) that use different param names and will just ignore them.
+        model_config = {"num_views": n_views, "resolution": resolution}
+        if aggregation_mode != "mean":
+            model_config["aggregation_mode"] = aggregation_mode
+        model = _get_cached_feature_model(feature_model_name, model_config)
         obj_batch = ObjectBatch(mesh=mesh)
         obj_batch = model(obj_batch)
-        return obj_batch.verts3d_feats[0].cpu()  # (V, F)
+        if aggregation_mode == "all_views":
+            return (
+                obj_batch.verts3d_feats[0].cpu(),
+                obj_batch.verts3d_feats_all_views[0].cpu(),
+                obj_batch.verts3d_feats_all_views_mask[0].cpu(),
+            )
+        return obj_batch.verts3d_feats[0].cpu(), None, None  # (V, F)
+
+    if aggregation_mode == "all_views":
+        raise NotImplementedError(
+            f"aggregation_mode='all_views' is only implemented for self-rendering "
+            f"feature models ({sorted(_SELF_RENDERING)}); {feature_model_name!r} uses "
+            f"the generic grid-sample + masked-mean pipeline below, which doesn't "
+            f"support it yet."
+        )
 
     H = W = resolution
 
@@ -211,10 +284,9 @@ def _extract_vert_feats(
     cam_intr4x4 = cam_intr4x4_single.unsqueeze(0).expand(n_views, -1, -1)  # (N, 4, 4)
 
     # ── 2. Load feature model and extract featmaps ────────────────────────────
-    from o3b.model.model import OD3D_Model
     from o3b.data.datatypes.frame import FrameBatch
-    model = OD3D_Model.create_by_name(feature_model_name)
-    model.eval().to(device)
+    model = _get_cached_feature_model(feature_model_name)
+    model.to(device)
 
     with torch.no_grad():
         frames_in  = FrameBatch(rgb=rgbs, depth=depths, normal=normals)
@@ -258,7 +330,7 @@ def _extract_vert_feats(
     # masked mean across views
     valid_f = valid.float().unsqueeze(1)                          # (N, 1, V)
     vert_feats = (sampled * valid_f).sum(0) / valid_f.sum(0).clamp(min=1)  # (C, V)
-    return vert_feats.T.cpu()                                     # (V, C)
+    return vert_feats.T.cpu(), None, None                         # (V, C)
 
 
 def convert_mesh_to_mc(mesh: Mesh, res: int = 64) -> Mesh:
